@@ -36,6 +36,7 @@ from lib import llm as llm_mod
 from lib import system_stats
 from lib.planner import PLANNER_OPTIONS
 from lib import evolution_export as evo_export
+from lib import journeys as journeys_mod
 
 # ── paths ────────────────────────────────────────────────────────────────────
 
@@ -1877,6 +1878,13 @@ def api_evolve(body: EvolveRequest):
             goal = ((parent.get("config") or {}).get("goal") or "").strip()
     if not goal:
         raise HTTPException(400, "goal required (or pick a seed topic)")
+    # Inject open J-key journey / heat-map reports into the evolution goal context
+    try:
+        jctx = journeys_mod.prompt_context(DATA_DIR, project="evolve-ui", limit=3)
+        if jctx:
+            goal = goal + "\n\n" + jctx
+    except Exception:
+        pass
     cfg = EvolutionConfig(
         goal=goal,
         output_type=body.output_type,
@@ -2913,7 +2921,11 @@ def _notes_context_for_prompt(pid: str) -> str:
     """Build a context block of open notes to inject into agent/devin/grok prompts.
     Also includes recent lessons from verified fixes."""
     notes = PM.open_notes(pid)
-    if not notes:
+    try:
+        journey_block = journeys_mod.prompt_context(DATA_DIR, project=pid, limit=5)
+    except Exception:
+        journey_block = ""
+    if not notes and not journey_block:
         return ""
     lessons_block = ""
     if LESSONS_FILE.exists():
@@ -2925,28 +2937,31 @@ def _notes_context_for_prompt(pid: str) -> str:
                 for l in recent:
                     lessons_block += f"- [{l.get('kind')}/{l.get('model')}] {l.get('approach','')[:200]}\n"
         except: pass
-    lines = [
-        "## Open bug notes (user-annotated on the page — address these & infer previous context)",
-        "- Note to agent: Infer relationships and context across these notes (e.g. if multiple notes mention component sizing, position, tabs, or UI state, combine this context)."
-    ]
-    for i, n in enumerate(notes, 1):
-        ctx = n.get("page_context") or {}
-        ctx_str = ""
-        if ctx.get("tab"): ctx_str += f" tab={ctx['tab']}"
-        if ctx.get("cell_id"): ctx_str += f" cell={ctx['cell_id']}"
-        if ctx.get("project"): ctx_str += f" project={ctx['project']}"
-        html_snip = (n.get("element_html") or "")[:200].replace("\n", " ")
-        imgs = n.get("images") or []
-        img_note = f"\n   images: {len(imgs)} screenshot(s) attached" if imgs else ""
-        lines.append(f"{i}. [{n.get('severity','bug')}] {n.get('note','')}"
-                     f"\n   selector: {n.get('selector','')}"
-                     f"\n   element: <{n.get('element_tag','')}> {(n.get('element_text','') or '')[:80]}"
-                     f"\n   html: {html_snip}"
-                     f"\n   context:{ctx_str} (note id {n.get('id')}){img_note}")
-        for j, img in enumerate(imgs[:3]):
-            if isinstance(img, str) and img.startswith("data:image/"):
-                lines.append(f"   [image {j+1}]: {img[:8192]}{'...(truncated)' if len(img) > 8192 else ''}")
-    return "\n".join(lines) + "\n\n" + lessons_block
+    lines = []
+    if notes:
+        lines = [
+            "## Open bug notes (user-annotated on the page — address these & infer previous context)",
+            "- Note to agent: Infer relationships and context across these notes (e.g. if multiple notes mention component sizing, position, tabs, or UI state, combine this context)."
+        ]
+        for i, n in enumerate(notes, 1):
+            ctx = n.get("page_context") or {}
+            ctx_str = ""
+            if ctx.get("tab"): ctx_str += f" tab={ctx['tab']}"
+            if ctx.get("cell_id"): ctx_str += f" cell={ctx['cell_id']}"
+            if ctx.get("project"): ctx_str += f" project={ctx['project']}"
+            html_snip = (n.get("element_html") or "")[:200].replace("\n", " ")
+            imgs = n.get("images") or []
+            img_note = f"\n   images: {len(imgs)} screenshot(s) attached" if imgs else ""
+            lines.append(f"{i}. [{n.get('severity','bug')}] {n.get('note','')}"
+                         f"\n   selector: {n.get('selector','')}"
+                         f"\n   element: <{n.get('element_tag','')}> {(n.get('element_text','') or '')[:80]}"
+                         f"\n   html: {html_snip}"
+                         f"\n   context:{ctx_str} (note id {n.get('id')}){img_note}")
+            for j, img in enumerate(imgs[:3]):
+                if isinstance(img, str) and img.startswith("data:image/"):
+                    lines.append(f"   [image {j+1}]: {img[:8192]}{'...(truncated)' if len(img) > 8192 else ''}")
+    notes_block = ("\n".join(lines) + "\n\n" + lessons_block) if lines else lessons_block
+    return (notes_block or "") + (journey_block or "")
 
 
 
@@ -3743,7 +3758,11 @@ def _notes_context_for_prompt(pid: str) -> str:
     """Build a context block of open notes to inject into agent/devin/grok prompts.
     Also includes recent lessons from verified fixes."""
     notes = PM.open_notes(pid)
-    if not notes:
+    try:
+        journey_block = journeys_mod.prompt_context(DATA_DIR, project=pid, limit=5)
+    except Exception:
+        journey_block = ""
+    if not notes and not journey_block:
         return ""
     lessons_block = ""
     if LESSONS_FILE.exists():
@@ -3755,28 +3774,31 @@ def _notes_context_for_prompt(pid: str) -> str:
                 for l in recent:
                     lessons_block += f"- [{l.get('kind')}/{l.get('model')}] {l.get('approach','')[:200]}\n"
         except: pass
-    lines = [
-        "## Open bug notes (user-annotated on the page — address these & infer previous context)",
-        "- Note to agent: Infer relationships and context across these notes (e.g. if multiple notes mention component sizing, position, tabs, or UI state, combine this context)."
-    ]
-    for i, n in enumerate(notes, 1):
-        ctx = n.get("page_context") or {}
-        ctx_str = ""
-        if ctx.get("tab"): ctx_str += f" tab={ctx['tab']}"
-        if ctx.get("cell_id"): ctx_str += f" cell={ctx['cell_id']}"
-        if ctx.get("project"): ctx_str += f" project={ctx['project']}"
-        html_snip = (n.get("element_html") or "")[:200].replace("\n", " ")
-        imgs = n.get("images") or []
-        img_note = f"\n   images: {len(imgs)} screenshot(s) attached" if imgs else ""
-        lines.append(f"{i}. [{n.get('severity','bug')}] {n.get('note','')}"
-                     f"\n   selector: {n.get('selector','')}"
-                     f"\n   element: <{n.get('element_tag','')}> {(n.get('element_text','') or '')[:80]}"
-                     f"\n   html: {html_snip}"
-                     f"\n   context:{ctx_str} (note id {n.get('id')}){img_note}")
-        for j, img in enumerate(imgs[:3]):
-            if isinstance(img, str) and img.startswith("data:image/"):
-                lines.append(f"   [image {j+1}]: {img[:8192]}{'...(truncated)' if len(img) > 8192 else ''}")
-    return "\n".join(lines) + "\n\n" + lessons_block
+    lines = []
+    if notes:
+        lines = [
+            "## Open bug notes (user-annotated on the page — address these & infer previous context)",
+            "- Note to agent: Infer relationships and context across these notes (e.g. if multiple notes mention component sizing, position, tabs, or UI state, combine this context)."
+        ]
+        for i, n in enumerate(notes, 1):
+            ctx = n.get("page_context") or {}
+            ctx_str = ""
+            if ctx.get("tab"): ctx_str += f" tab={ctx['tab']}"
+            if ctx.get("cell_id"): ctx_str += f" cell={ctx['cell_id']}"
+            if ctx.get("project"): ctx_str += f" project={ctx['project']}"
+            html_snip = (n.get("element_html") or "")[:200].replace("\n", " ")
+            imgs = n.get("images") or []
+            img_note = f"\n   images: {len(imgs)} screenshot(s) attached" if imgs else ""
+            lines.append(f"{i}. [{n.get('severity','bug')}] {n.get('note','')}"
+                         f"\n   selector: {n.get('selector','')}"
+                         f"\n   element: <{n.get('element_tag','')}> {(n.get('element_text','') or '')[:80]}"
+                         f"\n   html: {html_snip}"
+                         f"\n   context:{ctx_str} (note id {n.get('id')}){img_note}")
+            for j, img in enumerate(imgs[:3]):
+                if isinstance(img, str) and img.startswith("data:image/"):
+                    lines.append(f"   [image {j+1}]: {img[:8192]}{'...(truncated)' if len(img) > 8192 else ''}")
+    notes_block = ("\n".join(lines) + "\n\n" + lessons_block) if lines else lessons_block
+    return (notes_block or "") + (journey_block or "")
 
 
 @app.get("/api/projects/{pid}/notes")
@@ -3803,6 +3825,89 @@ def api_notes_delete(pid: str, nid: str):
     if not PM.delete_note(pid, nid):
         raise HTTPException(404, "note not found")
     return {"ok": True}
+
+
+# ── journey / heat-map sessions (J key) ───────────────────────────────────────
+
+
+class JourneyCreate(BaseModel):
+    label: str = ""
+    note: str = ""
+    project: str = "evolve-ui"
+    status: str = "open"
+    duration_ms: Optional[int] = None
+    meta: dict = Field(default_factory=dict)
+    path: list = Field(default_factory=list)
+    clicks: list = Field(default_factory=list)
+    hotspots: list = Field(default_factory=list)
+    heatmap_data_url: str = ""
+
+
+class JourneyUpdate(BaseModel):
+    status: Optional[str] = None
+    label: Optional[str] = None
+    note: Optional[str] = None
+
+
+@app.get("/api/journeys")
+def api_journeys_list(project: Optional[str] = None, open_only: bool = True):
+    if open_only:
+        sessions = journeys_mod.open_sessions(DATA_DIR, project=project, limit=40)
+        # list view without huge heatmap blobs
+        slim = []
+        for s in sessions:
+            row = {k: v for k, v in s.items() if k not in ("heatmap_data_url", "path")}
+            row["path_samples"] = len(s.get("path") or [])
+            row["has_heatmap"] = bool(s.get("heatmap_data_url"))
+            slim.append(row)
+        return {"sessions": slim, "open_count": len(slim), "dir": str(journeys_mod.journeys_dir(DATA_DIR))}
+    idx = journeys_mod.load_index(DATA_DIR)
+    if project:
+        idx = [e for e in idx if e.get("project") in (project, "evolve-ui")]
+    return {"sessions": idx, "count": len(idx), "dir": str(journeys_mod.journeys_dir(DATA_DIR))}
+
+
+@app.post("/api/journeys")
+def api_journeys_create(body: JourneyCreate):
+    session = journeys_mod.create_session(DATA_DIR, body.model_dump())
+    # don't echo full heatmap in response
+    out = {k: v for k, v in session.items() if k != "heatmap_data_url"}
+    out["has_heatmap"] = bool(session.get("heatmap_data_url"))
+    return out
+
+
+@app.get("/api/journeys/{sid}")
+def api_journeys_get(sid: str, include_heatmap: bool = False):
+    s = journeys_mod.get_session(DATA_DIR, sid)
+    if not s:
+        raise HTTPException(404, "journey not found")
+    if not include_heatmap:
+        s = {k: v for k, v in s.items() if k != "heatmap_data_url"}
+        s["has_heatmap"] = True  # may or may not; client can re-request
+    return s
+
+
+@app.patch("/api/journeys/{sid}")
+def api_journeys_update(sid: str, body: JourneyUpdate):
+    s = journeys_mod.update_session(DATA_DIR, sid, body.model_dump(exclude_unset=True))
+    if not s:
+        raise HTTPException(404, "journey not found")
+    return {k: v for k, v in s.items() if k != "heatmap_data_url"}
+
+
+@app.delete("/api/journeys/{sid}")
+def api_journeys_delete(sid: str):
+    if not journeys_mod.delete_session(DATA_DIR, sid):
+        raise HTTPException(404, "journey not found")
+    return {"ok": True}
+
+
+@app.get("/api/journeys/{sid}/report")
+def api_journeys_report(sid: str):
+    s = journeys_mod.get_session(DATA_DIR, sid)
+    if not s:
+        raise HTTPException(404, "journey not found")
+    return {"id": sid, "report": s.get("report") or journeys_mod.build_report(s)}
 
 
 # ── skill package ─────────────────────────────────────────────────────────────

@@ -1162,6 +1162,34 @@
     section.card .card-resizer:hover { opacity: .85; }
     section.card.resized { overflow: auto; }
     body.annotate-mode .card-resizer, body.annotate-mode .card-min { display: none !important; }
+    /* J-key journey / heat-map tracking */
+    .journey-btn { position: fixed; bottom: 1rem; left: 5.6rem; z-index: 200; background: var(--psych); color: #fff;
+      border: 0; border-radius: 999px; padding: .5rem .9rem; font: inherit; font-weight: 800; cursor: pointer;
+      box-shadow: 0 4px 14px color-mix(in srgb, var(--psych) 45%, transparent); font-size: .85rem;
+      display: flex; align-items: center; gap: .35rem; }
+    .journey-btn.recording { background: var(--crisis); animation: journeyPulse 1.2s ease infinite; }
+    .journey-btn .count { background: #fff; color: var(--psych); border-radius: 999px; padding: 0 .4rem; font-size: .72rem; min-width: 1.2rem; text-align: center; }
+    .journey-btn.recording .count { color: var(--crisis); }
+    @keyframes journeyPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(169,68,56,.45); } 50% { box-shadow: 0 0 0 8px rgba(169,68,56,0); } }
+    #journeyHeatCanvas { position: fixed; inset: 0; z-index: 180; pointer-events: none; width: 100%; height: 100%; }
+    .journey-hud { position: fixed; bottom: 4.2rem; left: 1rem; z-index: 210; background: var(--card);
+      border: 1px solid var(--line); border-radius: 12px; padding: .55rem .75rem; box-shadow: var(--shadow);
+      font-size: .8rem; min-width: 200px; display: none; }
+    .journey-hud.show { display: block; }
+    .journey-hud .jh-title { font-weight: 800; color: var(--psych); margin-bottom: .25rem; }
+    .journey-hud .jh-meta { color: var(--muted); font-size: .75rem; }
+    .journey-hud .jh-actions { display: flex; gap: .35rem; margin-top: .45rem; flex-wrap: wrap; }
+    .journey-popover { position: fixed; z-index: 420; left: 50%; top: 50%; transform: translate(-50%,-50%);
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+      padding: 1rem; width: min(420px, 92vw); }
+    .journey-popover h3 { margin: 0 0 .5rem; font-size: 1rem; }
+    .journey-popover .jh-preview { max-width: 100%; max-height: 160px; border: 1px solid var(--line); border-radius: 8px; margin: .4rem 0; background: #111; }
+    .journey-item { border: 1px solid var(--line); border-radius: 10px; padding: .55rem .7rem; margin: .4rem 0;
+      background: var(--soft3); font-size: .84rem; border-left: 4px solid var(--psych); }
+    .journey-item.resolved { opacity: .55; }
+    .journey-item .jh-heat { max-width: 100%; max-height: 120px; border-radius: 6px; border: 1px solid var(--line); margin-top: .35rem; }
+    html[data-theme="dark"] .journey-popover { background: var(--card); }
+    html[data-theme="dark"] .journey-hud { background: var(--card); }
     #authGate { position: fixed; inset: 0; background: rgba(15,20,15,.97); z-index: 99999; align-items: center; justify-content: center; padding: 1rem; }
     #authGate:not(.hidden) { display: flex !important; }
     .why-popover { position: absolute; z-index: 1000; background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: .7rem; width: 340px; font-size: .82rem; }
@@ -1304,6 +1332,18 @@
   <button class="bug-btn" id="bugBtn" title="Click or press F to enter bug-annotation mode, then click any element to leave a note. Notes get injected into Grok/Devin/Agent/Cerebras/Pi prompts.">
     Bug <span class="count" id="bugCount">0</span> <span style="opacity:.7;font-size:.7rem;font-weight:700">F</span>
   </button>
+  <button class="journey-btn" id="journeyBtn" title="Press J to record mouse path + clicks as a heat-map journey. Stop with J again. Report injects into the next agent/evolve prompt (like bug notes).">
+    Journey <span class="count" id="journeyCount">0</span> <span style="opacity:.7;font-size:.7rem;font-weight:700">J</span>
+  </button>
+  <canvas id="journeyHeatCanvas" aria-hidden="true"></canvas>
+  <div class="journey-hud" id="journeyHud">
+    <div class="jh-title">Recording journey…</div>
+    <div class="jh-meta" id="journeyHudMeta">0s · 0 clicks · 0 samples</div>
+    <div class="jh-actions">
+      <button type="button" class="small primary" id="btnJourneyStop">Stop &amp; save (J)</button>
+      <button type="button" class="small danger" id="btnJourneyCancel">Cancel</button>
+    </div>
+  </div>
   <header>
     <div>
       <h1>Evolve Studio</h1>
@@ -2171,12 +2211,22 @@
       <div class="tab-pane hidden" id="pane-notes">
         <section class="card">
           <h2>Notes</h2>
-          <p class="hint">Bug annotations. Open notes are injected into Grok/Devin/Agent/Cerebras/Pi prompts automatically.</p>
+          <p class="hint">Bug annotations (F). Open notes are injected into Grok/Devin/Agent/Cerebras/Pi prompts automatically.</p>
           <div class="row" style="margin-bottom:.5rem">
             <button class="small" id="btnRefreshNotes">Refresh</button>
             <label class="small" style="display:flex;align-items:center;gap:.3rem"><input type="checkbox" id="notesShowResolved" checked /> show resolved</label>
           </div>
           <div id="notesList"></div>
+        </section>
+        <section class="card">
+          <h2>Journey / heat-map reports <span class="pill run" style="font-size:.7rem">J</span></h2>
+          <p class="hint">Press <strong>J</strong> to track mouse + clicks while you use the app. Stop with J → save a heat map “video report” that is injected into the <em>next</em> agent / Evolve prompt (same channel as bug notes).</p>
+          <div class="row" style="margin-bottom:.5rem">
+            <button class="small psych" id="btnJourneyStart">Start recording (J)</button>
+            <button class="small" id="btnRefreshJourneys">Refresh</button>
+            <label class="small" style="display:flex;align-items:center;gap:.3rem"><input type="checkbox" id="journeysShowResolved" /> show resolved</label>
+          </div>
+          <div id="journeysList"></div>
         </section>
       </div>
 
@@ -2423,7 +2473,7 @@
       }
       if (tab === 'jobs') refreshJobs();
       if (tab === 'costs') refreshCosts();
-      if (tab === 'notes') refreshNotes();
+      if (tab === 'notes') { refreshNotes(); refreshJourneys(); }
       if (tab === 'media') { refreshVideos(); renderTtsTab(); renderMediaSelectors(); }
       if (tab === 'agents') showSubtab('agents', state.subTabs.agents || 'agent');
       if (tab === 'skill') { showSubtab('skill', state.subTabs.skill || 'skill-md'); refreshSkillTab(); }
@@ -3765,12 +3815,20 @@
         if (annotate.popover) closePopover();
         else if (annotate.picker) closeBugPicker();
         else if (annotate.mode) exitAnnotateMode();
+        else if (journey.recording) cancelJourney(false);
       }
       if ((e.key === 'f' || e.key === 'F') && !annotate.popover && !annotate.picker) {
         const t = e.target;
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
         e.preventDefault();
         if (annotate.mode) exitAnnotateMode(); else enterAnnotateMode('any');
+      }
+      if ((e.key === 'j' || e.key === 'J') && !annotate.popover && !annotate.picker && !annotate.mode) {
+        const t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable || t.tagName === 'SELECT')) return;
+        e.preventDefault();
+        if (journey.recording) stopJourneyAndSave();
+        else startJourney();
       }
     });
     $('#bugBtn').onclick = () => {
@@ -4104,6 +4162,374 @@ Be concise. Make the fix, verify, commit, push, confirm.`;
     }
     $('#btnRefreshNotes').onclick = refreshNotes;
     $('#notesShowResolved').onchange = refreshNotes;
+
+    // ── J-key journey / heat-map (mouse path + clicks → automation report) ──
+    const journey = {
+      recording: false,
+      t0: 0,
+      path: [],
+      clicks: [],
+      lastSample: 0,
+      raf: 0,
+      hudTimer: 0,
+      heatGrid: null,
+      gridW: 0,
+      gridH: 0,
+      cell: 24,
+    };
+
+    function journeyProject() {
+      return state.current || 'evolve-ui';
+    }
+
+    function buildSelectorLite(el) {
+      if (!el || el === document.body || el === document.documentElement) return 'body';
+      if (el.id) return `#${el.id}`;
+      let sel = (el.tagName || 'div').toLowerCase();
+      if (el.getAttribute && el.getAttribute('data-tab')) sel += `[data-tab="${el.getAttribute('data-tab')}"]`;
+      if (el.classList && el.classList.length) {
+        const c = [...el.classList].filter(x => x && !x.startsWith('ann-')).slice(0, 2);
+        if (c.length) sel += '.' + c.join('.');
+      }
+      return sel.slice(0, 120);
+    }
+
+    function resizeJourneyCanvas() {
+      const c = $('#journeyHeatCanvas');
+      if (!c) return;
+      c.width = window.innerWidth;
+      c.height = window.innerHeight;
+      journey.gridW = Math.ceil(c.width / journey.cell) + 1;
+      journey.gridH = Math.ceil(c.height / journey.cell) + 1;
+      journey.heatGrid = new Float32Array(journey.gridW * journey.gridH);
+    }
+
+    function addHeat(x, y, amount) {
+      if (!journey.heatGrid) return;
+      const gx = Math.floor(x / journey.cell);
+      const gy = Math.floor(y / journey.cell);
+      const r = 2;
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const ix = gx + dx, iy = gy + dy;
+          if (ix < 0 || iy < 0 || ix >= journey.gridW || iy >= journey.gridH) continue;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 0.5;
+          journey.heatGrid[iy * journey.gridW + ix] += amount / dist;
+        }
+      }
+    }
+
+    function drawJourneyHeat() {
+      const c = $('#journeyHeatCanvas');
+      if (!c || !journey.heatGrid) return;
+      const ctx = c.getContext('2d');
+      ctx.clearRect(0, 0, c.width, c.height);
+      if (!journey.recording && journey.path.length === 0) return;
+      let max = 0.001;
+      for (let i = 0; i < journey.heatGrid.length; i++) if (journey.heatGrid[i] > max) max = journey.heatGrid[i];
+      const cell = journey.cell;
+      for (let y = 0; y < journey.gridH; y++) {
+        for (let x = 0; x < journey.gridW; x++) {
+          const v = journey.heatGrid[y * journey.gridW + x] / max;
+          if (v < 0.05) continue;
+          const a = Math.min(0.55, v * 0.55);
+          // blue → cyan → yellow → red
+          const r = Math.floor(255 * Math.min(1, v * 1.4));
+          const g = Math.floor(255 * Math.min(1, v * 0.9));
+          const b = Math.floor(255 * (1 - v));
+          ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+          ctx.fillRect(x * cell, y * cell, cell, cell);
+        }
+      }
+      // click markers
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      journey.clicks.forEach((cl, i) => {
+        ctx.beginPath();
+        ctx.arc(cl.x, cl.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(169,68,56,0.95)';
+        ctx.beginPath();
+        ctx.arc(cl.x, cl.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.fillText(String(i + 1), cl.x + 7, cl.y - 7);
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      });
+    }
+
+    function journeyTickHud() {
+      if (!journey.recording) return;
+      const el = $('#journeyHudMeta');
+      if (!el) return;
+      const secs = Math.round((performance.now() - journey.t0) / 1000);
+      el.textContent = `${secs}s · ${journey.clicks.length} clicks · ${journey.path.length} samples`;
+    }
+
+    function onJourneyMove(e) {
+      if (!journey.recording) return;
+      const now = performance.now();
+      if (now - journey.lastSample < 32) return; // ~30Hz
+      journey.lastSample = now;
+      const x = e.clientX, y = e.clientY;
+      journey.path.push({ x: Math.round(x), y: Math.round(y), t_ms: Math.round(now - journey.t0) });
+      addHeat(x, y, 1);
+      if (journey.raf) cancelAnimationFrame(journey.raf);
+      journey.raf = requestAnimationFrame(drawJourneyHeat);
+    }
+
+    function onJourneyClick(e) {
+      if (!journey.recording) return;
+      // ignore our own controls
+      if (e.target.closest && (e.target.closest('.journey-btn') || e.target.closest('.journey-hud') || e.target.closest('.journey-popover') || e.target.closest('.bug-btn'))) return;
+      const now = performance.now();
+      const el = e.target;
+      journey.clicks.push({
+        x: Math.round(e.clientX),
+        y: Math.round(e.clientY),
+        t_ms: Math.round(now - journey.t0),
+        tag: (el.tagName || '').toLowerCase(),
+        text: (el.innerText || el.value || '').slice(0, 120),
+        selector: buildSelectorLite(el),
+        button: e.button,
+      });
+      addHeat(e.clientX, e.clientY, 8);
+      drawJourneyHeat();
+      journeyTickHud();
+    }
+
+    function computeHotspots(topN = 12) {
+      if (!journey.heatGrid) return [];
+      const cells = [];
+      for (let y = 0; y < journey.gridH; y++) {
+        for (let x = 0; x < journey.gridW; x++) {
+          const intensity = journey.heatGrid[y * journey.gridW + x];
+          if (intensity < 0.5) continue;
+          cells.push({
+            x: Math.round(x * journey.cell + journey.cell / 2),
+            y: Math.round(y * journey.cell + journey.cell / 2),
+            r: journey.cell,
+            intensity: Math.round(intensity * 10) / 10,
+            count: Math.round(intensity),
+          });
+        }
+      }
+      cells.sort((a, b) => b.intensity - a.intensity);
+      return cells.slice(0, topN);
+    }
+
+    function exportHeatmapDataUrl() {
+      const c = $('#journeyHeatCanvas');
+      if (!c) return '';
+      try { return c.toDataURL('image/png'); } catch { return ''; }
+    }
+
+    function startJourney() {
+      if (journey.recording) return;
+      if (annotate.mode) exitAnnotateMode();
+      journey.recording = true;
+      journey.t0 = performance.now();
+      journey.path = [];
+      journey.clicks = [];
+      journey.lastSample = 0;
+      resizeJourneyCanvas();
+      $('#journeyBtn')?.classList.add('recording');
+      $('#journeyHud')?.classList.add('show');
+      document.addEventListener('mousemove', onJourneyMove, { passive: true });
+      document.addEventListener('click', onJourneyClick, true);
+      window.addEventListener('resize', resizeJourneyCanvas);
+      journey.hudTimer = setInterval(journeyTickHud, 500);
+      journeyTickHud();
+      toast('Journey recording — move & click freely. Press J to stop & save.');
+    }
+
+    function detachJourneyListeners() {
+      document.removeEventListener('mousemove', onJourneyMove);
+      document.removeEventListener('click', onJourneyClick, true);
+      window.removeEventListener('resize', resizeJourneyCanvas);
+      if (journey.hudTimer) clearInterval(journey.hudTimer);
+      journey.hudTimer = 0;
+    }
+
+    function cancelJourney(silent) {
+      if (!journey.recording && !journey.path.length) return;
+      detachJourneyListeners();
+      journey.recording = false;
+      journey.path = [];
+      journey.clicks = [];
+      journey.heatGrid = null;
+      $('#journeyBtn')?.classList.remove('recording');
+      $('#journeyHud')?.classList.remove('show');
+      const c = $('#journeyHeatCanvas');
+      if (c) {
+        const ctx = c.getContext('2d');
+        ctx && ctx.clearRect(0, 0, c.width, c.height);
+      }
+      if (!silent) toast('Journey cancelled');
+    }
+
+    function stopJourneyAndSave() {
+      if (!journey.recording) return;
+      detachJourneyListeners();
+      journey.recording = false;
+      $('#journeyBtn')?.classList.remove('recording');
+      $('#journeyHud')?.classList.remove('show');
+      drawJourneyHeat();
+      const duration_ms = Math.round(performance.now() - journey.t0);
+      const heatmap_data_url = exportHeatmapDataUrl();
+      const hotspots = computeHotspots();
+      const path = journey.path.slice();
+      const clicks = journey.clicks.slice();
+      showJourneySavePopover({ duration_ms, heatmap_data_url, hotspots, path, clicks });
+    }
+
+    function showJourneySavePopover(payload) {
+      $$('.journey-popover').forEach(el => el.remove());
+      const pop = document.createElement('div');
+      pop.className = 'journey-popover';
+      const secs = Math.round((payload.duration_ms || 0) / 1000);
+      pop.innerHTML = `
+        <h3>Save journey report</h3>
+        <p class="hint" style="margin:0 0 .4rem">${secs}s · ${payload.clicks.length} clicks · ${payload.path.length} samples — injects into next agent / Evolve prompt</p>
+        ${payload.heatmap_data_url ? `<img class="jh-preview" src="${payload.heatmap_data_url}" alt="heatmap" />` : ''}
+        <label class="field" style="display:block;font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;margin-top:.35rem">Label
+          <input type="text" data-label value="UI journey ${new Date().toLocaleTimeString()}" style="width:100%;margin-top:.2rem" />
+        </label>
+        <label class="field" style="display:block;font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;margin-top:.35rem">What were you trying to do?
+          <textarea data-note rows="3" placeholder="e.g. Tried to start evolution from gallery seed, got stuck on advanced settings…" style="width:100%;margin-top:.2rem"></textarea>
+        </label>
+        <div class="row" style="margin-top:.6rem;justify-content:flex-end">
+          <button type="button" class="small" data-discard>Discard</button>
+          <button type="button" class="primary small" data-save>Save & inject</button>
+        </div>`;
+      document.body.appendChild(pop);
+      pop.querySelector('[data-discard]').onclick = () => {
+        pop.remove();
+        cancelJourney(true);
+        toast('Journey discarded');
+      };
+      pop.querySelector('[data-save]').onclick = async () => {
+        const label = pop.querySelector('[data-label]').value.trim() || 'Journey';
+        const note = pop.querySelector('[data-note]').value.trim();
+        const tab = document.querySelector('.tabs .active, .tab-link.active, [data-tab].active')?.dataset?.tab
+          || (location.hash || '').replace(/^#\/?/, '').split('/')[0] || 'evolve';
+        try {
+          const saved = await api('/api/journeys', {
+            method: 'POST',
+            body: JSON.stringify({
+              label,
+              note,
+              project: journeyProject(),
+              status: 'open',
+              duration_ms: payload.duration_ms,
+              meta: {
+                duration_ms: payload.duration_ms,
+                viewport_w: window.innerWidth,
+                viewport_h: window.innerHeight,
+                hash: location.hash,
+                url: location.pathname,
+                tab,
+                user_agent: navigator.userAgent.slice(0, 120),
+              },
+              path: payload.path,
+              clicks: payload.clicks,
+              hotspots: payload.hotspots,
+              heatmap_data_url: payload.heatmap_data_url,
+            }),
+          });
+          pop.remove();
+          // clear overlay after save
+          cancelJourney(true);
+          toast(`Journey saved · ${saved.id} — will inject into next prompt`);
+          refreshJourneys();
+        } catch (err) {
+          toast('Save failed: ' + err.message);
+        }
+      };
+      pop.querySelector('[data-note]')?.focus();
+    }
+
+    async function refreshJourneys() {
+      const list = $('#journeysList');
+      const countEl = $('#journeyCount');
+      if (!list) return;
+      try {
+        const showRes = $('#journeysShowResolved')?.checked;
+        const r = showRes
+          ? await api('/api/journeys?open_only=false')
+          : await api('/api/journeys?open_only=true');
+        const sessions = r.sessions || [];
+        const openN = showRes ? sessions.filter(s => s.status !== 'resolved').length : (r.open_count ?? sessions.length);
+        if (countEl) countEl.textContent = String(openN);
+        if (!sessions.length) {
+          list.innerHTML = '<div class="hint">No journeys yet. Press <strong>J</strong> to record mouse + clicks, then J again to save a heat-map report.</div>';
+          return;
+        }
+        list.innerHTML = sessions.map(s => {
+          const dur = s.duration_ms ? `${Math.round(s.duration_ms / 1000)}s` : '?';
+          const st = s.status || 'open';
+          return `<div class="journey-item ${st === 'resolved' ? 'resolved' : ''}" data-jid="${esc(s.id)}">
+            <div class="row" style="justify-content:space-between">
+              <strong>${esc(s.label || s.id)}</strong>
+              <span class="pill ${st === 'open' ? 'run' : 'ok'}" style="font-size:.65rem">${esc(st)}</span>
+            </div>
+            <div class="hint" style="margin:.2rem 0">${dur} · ${s.clicks?.length ?? s.clicks ?? 0} clicks · ${s.path_samples ?? 0} samples · ${esc((s.created_at || '').slice(0, 19))}</div>
+            ${s.note ? `<div>${esc(s.note)}</div>` : ''}
+            <details style="margin-top:.3rem"><summary class="hint" style="cursor:pointer">Report preview</summary>
+              <pre class="out" style="max-height:160px;font-size:.72rem;margin-top:.3rem" data-report="${esc(s.id)}">Loading…</pre>
+            </details>
+            <div class="row" style="margin-top:.35rem">
+              ${st !== 'resolved' ? `<button class="small" data-resolve-j="${esc(s.id)}">Resolve</button>` : `<button class="small" data-reopen-j="${esc(s.id)}">Reopen</button>`}
+              <button class="small danger" data-del-j="${esc(s.id)}">Delete</button>
+            </div>
+          </div>`;
+        }).join('');
+        list.querySelectorAll('details').forEach(det => {
+          det.addEventListener('toggle', async () => {
+            if (!det.open) return;
+            const pre = det.querySelector('[data-report]');
+            if (!pre || pre.dataset.loaded) return;
+            try {
+              const rep = await api(`/api/journeys/${pre.dataset.report}/report`);
+              pre.textContent = rep.report || '(empty)';
+              pre.dataset.loaded = '1';
+            } catch (e) { pre.textContent = e.message; }
+          });
+        });
+        list.querySelectorAll('[data-resolve-j]').forEach(btn => {
+          btn.onclick = async () => {
+            await api(`/api/journeys/${btn.dataset.resolveJ}`, { method: 'PATCH', body: JSON.stringify({ status: 'resolved' }) });
+            refreshJourneys();
+          };
+        });
+        list.querySelectorAll('[data-reopen-j]').forEach(btn => {
+          btn.onclick = async () => {
+            await api(`/api/journeys/${btn.dataset.reopenJ}`, { method: 'PATCH', body: JSON.stringify({ status: 'open' }) });
+            refreshJourneys();
+          };
+        });
+        list.querySelectorAll('[data-del-j]').forEach(btn => {
+          btn.onclick = async () => {
+            if (!confirm('Delete this journey report?')) return;
+            await api(`/api/journeys/${btn.dataset.delJ}`, { method: 'DELETE' });
+            refreshJourneys();
+          };
+        });
+      } catch (e) {
+        list.innerHTML = `<div class="hint">err: ${esc(e.message)}</div>`;
+      }
+    }
+
+    $('#journeyBtn') && ($('#journeyBtn').onclick = () => {
+      if (journey.recording) stopJourneyAndSave(); else startJourney();
+    });
+    $('#btnJourneyStop') && ($('#btnJourneyStop').onclick = stopJourneyAndSave);
+    $('#btnJourneyCancel') && ($('#btnJourneyCancel').onclick = () => cancelJourney(false));
+    $('#btnJourneyStart') && ($('#btnJourneyStart').onclick = startJourney);
+    $('#btnRefreshJourneys') && ($('#btnRefreshJourneys').onclick = refreshJourneys);
+    $('#journeysShowResolved') && ($('#journeysShowResolved').onchange = refreshJourneys);
+    // initial count
+    refreshJourneys().catch(() => {});
 
     // ── card move / resize / minimize ──
     function makeCardInteractive(card) {
