@@ -263,6 +263,22 @@
     .evolve-start-main { max-width: min(720px, 100%); margin: 0 auto; }
     #evolveResult { min-width: 0; max-width: 100%; overflow-x: hidden; word-break: break-word; }
     #evolveResult table { width: 100%; }
+    .evo-goal-block { font-size: .86rem; margin-bottom: .5rem; padding: .55rem .7rem;
+      background: var(--soft3, #fafbf8); border: 1px solid var(--line); border-radius: 10px; }
+    .evo-goal-block > strong { display: block; font-size: .72rem; text-transform: uppercase;
+      letter-spacing: .04em; color: var(--muted); margin-bottom: .35rem; }
+    .evo-goal-block .md { line-height: 1.45; color: var(--ink); }
+    .evo-goal-block .md h1, .evo-goal-block .md h2, .evo-goal-block .md h3,
+    .evo-goal-block .md h4 { margin: .55rem 0 .3rem; font-size: 1em; color: var(--hero); }
+    .evo-goal-block .md p { margin: .3rem 0; }
+    .evo-goal-block .md ul, .evo-goal-block .md ol { margin: .25rem 0 .25rem 1.1rem; padding: 0; }
+    .evo-goal-block .md li { margin: .15rem 0; }
+    .evo-goal-block .md code { font-size: .84em; background: var(--code-bg, #f0f4ec); padding: .05rem .3rem; border-radius: 4px; }
+    .evo-goal-block .md pre { background: #1e241f; color: #e7f0e4; border-radius: 8px; padding: .55rem .65rem;
+      overflow: auto; font-size: .78rem; max-height: 240px; }
+    .evo-goal-block .md blockquote { margin: .35rem 0; padding: .2rem .6rem; border-left: 3px solid var(--acid);
+      color: var(--muted); background: var(--soft); }
+    html[data-theme="dark"] .evo-goal-block { background: var(--soft); }
     .evo-workspace-empty {
       border: 1px dashed #cfe0cb; border-radius: 12px; padding: 1.4rem 1rem; text-align: center;
       background: #fafbf8; color: var(--muted); font-size: .88rem;
@@ -7841,8 +7857,14 @@ Be concise. Make the fix, verify, commit, push, confirm.`;
         html += `<div class="pill bad" style="margin-bottom:.4rem">Failed · progress kept on disk${run.error ? ` · ${esc(String(run.error).slice(0, 160))}` : ''} — you can Resume if gens remain</div>`;
       }
 
-      if (run.config?.goal) {
-         html += `<div style="font-size:.82rem; margin-bottom:.4rem; padding:.4rem; background:#fafbf8; border:1px solid var(--line); border-radius:8px"><strong>Goal:</strong> ${esc(run.config.goal)}</div>`;
+      if (run.config?.goal || run.config?.goal_brief) {
+        const goalText = run.config.goal || '';
+        const brief = (run.config.goal_brief && run.config.goal_brief !== goalText) ? run.config.goal_brief : '';
+        html += `<div class="evo-goal-block">
+          <strong>Goal</strong>
+          <div class="md">${renderMarkdown(goalText)}</div>
+          ${brief ? `<div class="hint" style="margin:.45rem 0 .15rem;font-weight:700">Planner brief</div><div class="md">${renderMarkdown(brief)}</div>` : ''}
+        </div>`;
       }
       // Core product stage — embedded HTML (not just a link). Primary evolve surface.
       {
@@ -8838,7 +8860,7 @@ Be concise. Make the fix, verify, commit, push, confirm.`;
       const gens = data.generations || [];
       let html = `<div style="margin-bottom:.5rem"><strong>All model prompts by generation</strong>
         <div class="hint">evolution ${esc(data.evolution_id || '')} · model ${esc(data.llm_model || '')}</div>
-        ${data.goal ? `<div style="padding:.4rem; background:#fafbf8; border:1px solid var(--line); border-radius:8px; margin-top:.3rem"><strong>Goal:</strong> ${esc(data.goal)}</div>` : ''}
+        ${data.goal ? `<div class="evo-goal-block" style="margin-top:.3rem"><strong>Goal</strong><div class="md">${renderMarkdown(data.goal)}</div></div>` : ''}
       </div>`;
       for (const g of gens) {
         html += `<div style="border-top:1px solid var(--line); margin-top:.6rem; padding-top:.5rem">
@@ -9220,7 +9242,7 @@ Be concise. Make the fix, verify, commit, push, confirm.`;
       let html = `<div style="margin-bottom:.8rem">
         <div style="font-weight:800; font-size:1rem; color:var(--hero); margin-bottom:.35rem">Model answers document</div>
         <div class="hint">source: ${esc(sourceLabel || 'evolution')} · ${calls.length} call(s)</div>
-        ${payload.goal ? `<div style="margin:.4rem 0; padding:.45rem; background:#fafbf8; border:1px solid var(--line); border-radius:8px"><strong>Goal:</strong> ${esc(payload.goal)}</div>` : ''}
+        ${payload.goal ? `<div class="evo-goal-block" style="margin:.4rem 0"><strong>Goal</strong><div class="md">${renderMarkdown(payload.goal)}</div></div>` : ''}
         ${payload.llm_model ? `<div class="hint">Model: <strong>${esc(payload.llm_model)}</strong></div>` : ''}
         ${payload.best ? `<div class="hint">Best: <strong>${esc(payload.best.id || '')}</strong> · fitness ${esc(payload.best.fitness ?? '—')}</div>` : ''}
         ${payload.promoted_project_id || payload.project_id ? `<div class="hint">Project: <strong>${esc(payload.promoted_project_id || payload.project_id)}</strong></div>` : ''}
