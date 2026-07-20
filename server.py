@@ -80,6 +80,8 @@ MEMORY_CLI = MEMORY_ROOT / "easy-memory"
 MEMORY_VAULT = MEMORY_ROOT / "obsidian-vault"
 
 for d in (PROJECTS_ROOT, JOBS, STATIC, ARCHIVES):
+    pass  # placeholder
+for d in (PROJECTS_ROOT, JOBS, STATIC, ARCHIVES):
     d.mkdir(parents=True, exist_ok=True)
 
 # Serialize Devin jobs — the Devin CLI SIGPIPEs (exit -13) when too many
@@ -115,10 +117,13 @@ def _reconcile_orphaned_jobs() -> None:
 
 
 def _reconcile_orphaned_evolutions(evolutions_root: Path) -> int:
-    """On startup, mark evolutions stuck in running/queued as failed.
+    """On startup, mark evolutions stuck in running/queued as interrupted.
 
     Evolution workers are in-process threads. A server restart kills them while
     evolution.json can still say status=running — the UI then lies forever.
+
+    NEVER deletes evolution.json, candidates, llm_calls, or exports/*.html.
+    Status becomes 'failed' with a clear error so Resume can pick up later.
     """
     n = 0
     if not evolutions_root.exists():
@@ -129,12 +134,24 @@ def _reconcile_orphaned_evolutions(evolutions_root: Path) -> int:
             st = (data.get("status") or "").lower()
             if st not in ("running", "queued", "starting"):
                 continue
+            # Preserve any product HTML flags for the UI
+            exports = p.parent / "exports"
+            has_html = False
+            if exports.is_dir():
+                has_html = any(
+                    f.is_file() and f.suffix == ".html" and f.stat().st_size > 50
+                    for f in exports.iterdir()
+                )
             data["status"] = "failed"
             data["error"] = (
-                "orphaned by server restart — worker thread died while status was still "
-                f"'{st}'. Partial progress (candidates, llm_calls, exports) is kept on disk."
+                "interrupted by server restart — worker thread died while status was still "
+                f"'{st}'. All on-disk progress kept (evolution.json, gen*/candidates, "
+                f"exports HTML{' including PRODUCT-latest.html' if has_html else ''}). "
+                "Use Resume to continue."
             )
             data["updated_at"] = utcnow()
+            data["interrupted_by_restart"] = True
+            data["has_product_html"] = has_html
             events = data.get("events") or []
             events.append({
                 "ts": utcnow(),
@@ -623,6 +640,22 @@ class AudioSelectRequest(BaseModel):
     audio_id: Optional[str] = None
 
 
+class UsefulRequest(BaseModel):
+    useful: bool
+
+
+class EscalateRequest(BaseModel):
+    agent: str
+    model: Optional[str] = None
+    extra_context: Optional[str] = None
+
+
+class RecommendReasonsRequest(BaseModel):
+    note_id: str
+    job_id: Optional[str] = None
+    model: str = "gemma-4-31b"
+
+
 # ── routes: health + index ───────────────────────────────────────────────────
 
 
@@ -656,6 +689,27 @@ def health():
 
 # ── routes: factories (projects) ─────────────────────────────────────────────
 
+
+def _planner_options_with_live_devin() -> list[dict]:
+    """Static planner catalog, but Devin entries come from live free-model discovery when available."""
+    from lib import devin_usage as dusage
+    cat = dusage.USAGE.get_catalog() or _DEVIN_CATALOG or {}
+    live_devin = cat.get("dropdown_models") or []
+    if not live_devin:
+        # Fall back to static free pair (GLM-5.2 + SWE-1.7)
+        live_devin = [
+            {"id": "devin:glm-5-2", "harness": "devin", "model": "glm-5-2",
+             "label": "Devin · GLM-5.2 High (free)", "is_free": True},
+            {"id": "devin:swe-1-7", "harness": "devin", "model": "swe-1-7",
+             "label": "Devin · SWE-1.7 Max (free)", "is_free": True},
+        ]
+    out = []
+    for opt in PLANNER_OPTIONS:
+        if str(opt.get("harness")) == "devin" or str(opt.get("id") or "").startswith("devin:"):
+            continue
+        out.append(opt)
+    out.extend(live_devin)
+    return out
 
 
 @app.get("/api/evolve/options")
@@ -1892,17 +1946,35 @@ def api_evolve_list(full: bool = False):
         "evolutions": EVOLUTION_ENGINE.list_runs(EVOLUTIONS_ROOT, full=full),
         "count": len(list(EVOLUTIONS_ROOT.glob("*/evolution.json"))),
         "dir": str(EVOLUTIONS_ROOT),
+        "note": "Runs and product HTML under data/evolutions/<id>/ survive refresh and server restart.",
     }
 
+
+@app.get("/api/evolve/runs")
+def api_evolve_runs_alias(full: bool = False):
+    """Alias for /api/evolve — frontend hash #/evolve/runs maps here; must not hit {evo_id}."""
+    return api_evolve_list(full=full)
 
 
 @app.get("/api/evolve/{evo_id}")
 def api_evolve_status(evo_id: str):
+    # Reserved path segments that are list/meta endpoints (never treat as run ids)
+    if evo_id in ("runs", "options", "gallery", "seeds", "money-ideas", "list"):
+        if evo_id == "runs":
+            return api_evolve_list()
+        raise HTTPException(404, f"use /api/evolve/{evo_id} static route")
     run = EVOLUTION_ENGINE.get_run(evo_id)
     if not run:
         # Fall back to on-disk evolution.json (survives server restarts)
         data = EVOLUTION_ENGINE.load_disk_dict(evo_id, EVOLUTIONS_ROOT)
         if data:
+            data["persisted"] = True
+            data["disk_path"] = str(EVOLUTIONS_ROOT / evo_id)
+            # Surface product HTML even if status was interrupted mid-run
+            latest = EVOLUTIONS_ROOT / evo_id / "exports" / "PRODUCT-latest.html"
+            if latest.is_file():
+                data["has_product_html"] = True
+                data["product_url"] = f"/api/evolve/{evo_id}/export/file/PRODUCT-latest.html"
             return data
         raise HTTPException(404, "evolution run not found")
     return run._to_dict()
@@ -2713,6 +2785,1151 @@ def _deploy_prompt(pid: str, target: str, options: dict, state: dict, skill_text
 
 
 
+
+
+
+def _cleanup_zombie_jobs() -> None:
+    """Mark jobs stuck in 'running' for >30min as failed."""
+    now = datetime.now(timezone.utc)
+    for p in JOBS.glob("*.json"):
+        try:
+            j = json.loads(p.read_text())
+            if j.get("status") != "running":
+                continue
+            created = j.get("updated_at") or j.get("created_at")
+            if not created:
+                continue
+            ct = datetime.fromisoformat(created)
+            age_min = (now - ct).total_seconds() / 60
+            if age_min > 30:
+                set_job(j["id"], status="failed", error=f"zombie: running for {age_min:.0f}min, process likely died")
+        except Exception:
+            pass
+
+
+
+def _agent_status_from_result(job_id: str, result_text: str) -> None:
+    """Agent CLIs can be killed by SIGPIPE (exit -13) even after committing work."""
+    job = get_job(job_id)
+    if job.get("status") != "failed":
+        return
+    exit_code = job.get("exit_code")
+    killed_by_signal = isinstance(exit_code, int) and exit_code < 0
+    if not killed_by_signal:
+        return
+    success_markers = [
+        r"COMMITTED:\s*[a-f0-9]{7,40}",
+        r"git push.*origin",
+        r"pushed.*to.*origin",
+        r"fix.*verified",
+        r"fix.*confirmed",
+        r"successfully.*fixed",
+        r"fix.*committed",
+    ]
+    for pattern in success_markers:
+        if re.search(pattern, result_text or "", re.IGNORECASE):
+            set_job(job_id, status="completed", exit_code=exit_code,
+                    note="process killed by signal but agent completed its work")
+            return
+
+
+
+def _capture_lesson(job: dict) -> None:
+    if not job or not job.get("result_text"):
+        return
+    if job.get("purpose") != "bugfix":
+        return
+    lessons_file = LESSONS_FILE
+    lessons = []
+    if lessons_file.exists():
+        try: lessons = json.loads(lessons_file.read_text())
+        except: lessons = []
+    result = job.get("result_text", "")
+    approach = result.split("COMMITTED:")[0].split("FIXED_NOT_COMMITTED:")[0].split("CANNOT_FIX:")[0].strip()
+    approach = approach[:500]
+    lesson = {
+        "id": uuid.uuid4().hex[:8],
+        "job_id": job.get("id"),
+        "kind": job.get("kind"),
+        "model": job.get("model"),
+        "purpose": job.get("purpose"),
+        "approach": approach,
+        "lesson_type": "success",
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "selector_hint": (job.get("prompt") or "")[:200],
+    }
+    lessons.append(lesson)
+    lessons = lessons[-100:]
+    lessons_file.write_text(json.dumps(lessons, indent=2))
+
+
+
+def _capture_cannot_fix_lesson(job: dict) -> bool:
+    if not job or not job.get("result_text"):
+        return False
+    result = job.get("result_text", "")
+    m = re.search(r"CANNOT_FIX:\s*(.+)", result, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return False
+    reason = m.group(1).strip().splitlines()[0][:500] if m.group(1).strip() else ""
+    approach = result.split("CANNOT_FIX:")[0].strip()[-400:]
+    lessons_file = LESSONS_FILE
+    lessons = []
+    if lessons_file.exists():
+        try: lessons = json.loads(lessons_file.read_text())
+        except: lessons = []
+    if any(l.get("job_id") == job.get("id") and l.get("lesson_type") == "failure" for l in lessons):
+        return False
+    lesson = {
+        "id": uuid.uuid4().hex[:8],
+        "job_id": job.get("id"),
+        "kind": job.get("kind"),
+        "model": job.get("model"),
+        "purpose": job.get("purpose"),
+        "approach": approach,
+        "reason": reason,
+        "lesson_type": "failure",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "selector_hint": (job.get("prompt") or "")[:200],
+    }
+    lessons.append(lesson)
+    lessons = lessons[-100:]
+    lessons_file.write_text(json.dumps(lessons, indent=2))
+    return True
+
+
+
+def _maybe_capture_cannot_fix_lesson(job_id: str) -> None:
+    try:
+        job = get_job(job_id)
+        if _capture_cannot_fix_lesson(job):
+            set_job(job_id, cannot_fix_lesson_captured=True)
+    except Exception:
+        pass
+
+
+
+def _notes_context_for_prompt(pid: str) -> str:
+    """Build a context block of open notes to inject into agent/devin/grok prompts.
+    Also includes recent lessons from verified fixes."""
+    notes = PM.open_notes(pid)
+    if not notes:
+        return ""
+    lessons_block = ""
+    if LESSONS_FILE.exists():
+        try:
+            lessons = json.loads(LESSONS_FILE.read_text())
+            recent = lessons[-5:]
+            if recent:
+                lessons_block = "\n## Recent lessons from verified fixes (learn from these patterns)\n"
+                for l in recent:
+                    lessons_block += f"- [{l.get('kind')}/{l.get('model')}] {l.get('approach','')[:200]}\n"
+        except: pass
+    lines = [
+        "## Open bug notes (user-annotated on the page — address these & infer previous context)",
+        "- Note to agent: Infer relationships and context across these notes (e.g. if multiple notes mention component sizing, position, tabs, or UI state, combine this context)."
+    ]
+    for i, n in enumerate(notes, 1):
+        ctx = n.get("page_context") or {}
+        ctx_str = ""
+        if ctx.get("tab"): ctx_str += f" tab={ctx['tab']}"
+        if ctx.get("cell_id"): ctx_str += f" cell={ctx['cell_id']}"
+        if ctx.get("project"): ctx_str += f" project={ctx['project']}"
+        html_snip = (n.get("element_html") or "")[:200].replace("\n", " ")
+        imgs = n.get("images") or []
+        img_note = f"\n   images: {len(imgs)} screenshot(s) attached" if imgs else ""
+        lines.append(f"{i}. [{n.get('severity','bug')}] {n.get('note','')}"
+                     f"\n   selector: {n.get('selector','')}"
+                     f"\n   element: <{n.get('element_tag','')}> {(n.get('element_text','') or '')[:80]}"
+                     f"\n   html: {html_snip}"
+                     f"\n   context:{ctx_str} (note id {n.get('id')}){img_note}")
+        for j, img in enumerate(imgs[:3]):
+            if isinstance(img, str) and img.startswith("data:image/"):
+                lines.append(f"   [image {j+1}]: {img[:8192]}{'...(truncated)' if len(img) > 8192 else ''}")
+    return "\n".join(lines) + "\n\n" + lessons_block
+
+
+
+def _skill_context_for_prompt(pid: str) -> str:
+    return PM.build_skill_context(pid)
+
+
+
+def _memory_context_for_prompt(query: str = "", pid: str = "default") -> str:
+    search_q = query or f"dev-studio factory {pid} agent orchestration"
+    memories = search_easy_memory(search_q, limit=3)
+    if not memories:
+        return ""
+    lines = ["## Easy Memory Context (from /home/q/Downloads/memory)"]
+    for m in memories:
+        lines.append(f"- **{m.get('title')}** (Relevance: {m.get('score', 0):.2f}) [{m.get('type')}]")
+        snip = m.get("snippet", "").strip().replace("\n", " ")
+        if snip:
+            lines.append(f"  {snip[:300]}...")
+    return "\n".join(lines) + "\n\n"
+
+
+
+def _devin_worker(job_id: str, cmd: list[str], cwd: Path) -> None:
+    set_job(job_id, status="queued", note="waiting for Devin slot (max 3 concurrent)")
+    t0 = time.time()
+    job_meta = get_job(job_id) or {}
+    model = job_meta.get("model") or "unknown"
+    purpose = job_meta.get("purpose") or "devin_job"
+    # Soft throttle against estimated free-tier + external CLIs
+    try:
+        from lib import devin_usage as dusage
+        throttle, reason = dusage.USAGE.should_throttle()
+        if throttle:
+            set_job(job_id, note=f"waiting: devin quota pressure ({reason})")
+            waited = 0.0
+            while waited < 120 and throttle:
+                time.sleep(5)
+                waited += 5
+                throttle, reason = dusage.USAGE.should_throttle()
+            if throttle:
+                set_job(
+                    job_id,
+                    status="failed",
+                    error=f"devin free-tier pressure high ({reason}); try later",
+                    exit_code=-1,
+                )
+                return
+    except Exception:
+        pass
+    with _DEVIN_SEMAPHORE:
+        set_job(job_id, status="running", note="")
+        run_subprocess_job(job_id, cmd, cwd)
+    log_path = JOBS / f"{job_id}.log"
+    text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    parts = text.split("\n\n", 1)
+    body = parts[1] if len(parts) > 1 else text
+    set_job(job_id, result_text=body[-20000:])
+    _agent_status_from_result(job_id, body)
+    _maybe_capture_cannot_fix_lesson(job_id)
+    try:
+        from lib import devin_usage as dusage
+        final = get_job(job_id) or {}
+        ok = final.get("status") == "completed"
+        prompt_est = ""
+        pp = JOBS / f"{job_id}.prompt.txt"
+        if pp.exists():
+            prompt_est = pp.read_text(encoding="utf-8", errors="replace")[:50000]
+        dusage.record_studio_call(
+            model,
+            prompt_est,
+            body if ok else "",
+            ok=ok,
+            purpose=purpose,
+            run_id=job_id,
+            duration_secs=round(time.time() - t0, 3),
+            error=None if ok else str(final.get("error") or final.get("status")),
+        )
+    except Exception:
+        pass
+
+
+# ── Agy (Google Antigravity CLI) ─────────────────────────────────────────────
+
+
+
+def _agy_worker(job_id: str, cmd: list[str], cwd: Path) -> None:
+    run_subprocess_job(job_id, cmd, cwd)
+    log_path = JOBS / f"{job_id}.log"
+    text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    parts = text.split("\n\n", 1)
+    body = parts[1] if len(parts) > 1 else text
+    set_job(job_id, result_text=body[-20000:])
+    _agent_status_from_result(job_id, body)
+    _maybe_capture_cannot_fix_lesson(job_id)
+
+
+# ── Cerebras (free, fast inference) ──────────────────────────────────────────
+
+
+
+def _cerebras_worker(job_id: str, prompt: str, model: str) -> None:
+    set_job(job_id, status="running")
+    log_path = JOBS / f"{job_id}.log"
+    cancelled = False
+    try:
+        client, key_id = llm.make_cerebras_client()
+        system_msg = ("You are a fast, focused coding agent fixing bugs in a web app. "
+                      "Read the code, diagnose the root cause, propose the smallest correct fix, "
+                      "and output the fix as a unified diff or clear instructions. Be concise.")
+        with open(log_path, "w") as log:
+            log.write(f"$ cerebras chat model={model} key={key_id}\n\n")
+            log.flush()
+            stream = client.chat.completions.create(
+                messages=[{"role": "system", "content": system_msg},
+                          {"role": "user", "content": prompt}],
+                model=model, stream=True, max_completion_tokens=8192, temperature=0.2,
+            )
+            full = []
+            in_reasoning = False
+            for chunk in stream:
+                with _cancel_flags_lock:
+                    if job_id in _cancel_flags:
+                        cancelled = True
+                        break
+                choice = chunk.choices[0]
+                delta = choice.delta
+                reasoning = getattr(delta, "reasoning_content", None) or ""
+                content = getattr(delta, "content", None) or ""
+                if reasoning:
+                    if not in_reasoning:
+                        log.write("\n[reasoning] ")
+                        in_reasoning = True
+                    log.write(reasoning)
+                    log.flush()
+                    full.append(reasoning)
+                if content:
+                    if in_reasoning:
+                        log.write("\n[response] ")
+                        in_reasoning = False
+                    log.write(content)
+                    log.flush()
+                    full.append(content)
+            text = "".join(full)
+            if cancelled:
+                log.write("\n\n[stopped by user]\n")
+        if cancelled:
+            set_job(job_id, status="failed", error="stopped by user",
+                    result_text=text[-20000:])
+        else:
+            set_job(job_id, status="completed", result_text=text[-20000:])
+            _maybe_capture_cannot_fix_lesson(job_id)
+    except Exception as e:
+        set_job(job_id, status="failed", error=str(e)[:500])
+        with open(log_path, "a") as log:
+            log.write(f"\n\nERROR: {e}\n")
+    finally:
+        with _cancel_flags_lock:
+            _cancel_flags.discard(job_id)
+
+
+
+def _pi_worker(job_id: str, cmd: list[str], prompt: str) -> None:
+    set_job(job_id, status="running", cmd=cmd, cwd=str(ROOT))
+    log_path = JOBS / f"{job_id}.log"
+    try:
+        full_env = os.environ.copy()
+        for keyfile in (Path.home() / ".config" / "elicit" / "env", ROOT / ".env.elicit", STUDIO / ".env"):
+            if keyfile.is_file():
+                for line in keyfile.read_text().splitlines():
+                    if "=" in line and not line.strip().startswith("#"):
+                        k, v = line.split("=", 1)
+                        full_env.setdefault(k.strip(), v.strip().strip("'\""))
+        with open(log_path, "w") as log:
+            log.write(f"$ {' '.join(cmd)} < prompt.txt\n\n")
+            log.flush()
+            proc = subprocess.run(cmd, cwd=str(ROOT), env=full_env, stdout=log,
+                                  stderr=subprocess.STDOUT, text=True, input=prompt,
+                                  timeout=60 * 10)
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        parts = text.split("\n\n", 1)
+        result = parts[1] if len(parts) > 1 else text
+        set_job(job_id, status="completed" if proc.returncode == 0 else "failed",
+                exit_code=proc.returncode, result_text=result[-20000:])
+        _agent_status_from_result(job_id, result)
+        _maybe_capture_cannot_fix_lesson(job_id)
+    except subprocess.TimeoutExpired:
+        set_job(job_id, status="failed", error="timeout", log_path=str(log_path))
+    except Exception as e:
+        set_job(job_id, status="failed", error=str(e)[:500])
+
+
+# ── costs ────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/projects/{pid}/devin/run")
+def api_devin_run(pid: str, body: DevinRunRequest):
+    if not DEVIN_BIN.exists():
+        raise HTTPException(500, "devin binary not found")
+    job_id = uuid.uuid4().hex[:12]
+    skill_ctx = _skill_context_for_prompt(pid) if getattr(body, "include_skill", True) else ""
+    notes_ctx = _notes_context_for_prompt(pid)
+    mem_ctx = _memory_context_for_prompt(body.prompt, pid) if getattr(body, "include_memory", True) else ""
+    full_ctx = (skill_ctx + notes_ctx + mem_ctx).strip()
+    prompt = (full_ctx + "\n\n" + body.prompt.strip()) if full_ctx else body.prompt.strip()
+    prompt_path = JOBS / f"{job_id}.prompt.txt"
+    prompt_path.write_text(prompt)
+    cwd = PROJECTS_ROOT / pid
+    cmd = [
+        str(DEVIN_BIN), "--print",
+        "--prompt-file", str(prompt_path),
+        "--model", body.model,
+        "--permission-mode", body.permission_mode,
+    ]
+    set_job(job_id, status="queued", kind="devin", project=pid, purpose=body.purpose,
+            model=body.model, permission_mode=body.permission_mode,
+            notes_injected=len(PM.open_notes(pid)), skill_injected=len(skill_ctx))
+    threading.Thread(target=_devin_worker, args=(job_id, cmd, cwd), daemon=True).start()
+    return {"job_id": job_id, "status": "queued", "model": body.model,
+            "notes_injected": len(PM.open_notes(pid)), "skill_injected": len(skill_ctx)}
+
+
+def _agent_status_from_result(job_id: str, result_text: str) -> None:
+    """Agent CLIs can be killed by SIGPIPE (exit -13) even after committing work."""
+    job = get_job(job_id)
+    if job.get("status") != "failed":
+        return
+    exit_code = job.get("exit_code")
+    killed_by_signal = isinstance(exit_code, int) and exit_code < 0
+    if not killed_by_signal:
+        return
+    success_markers = [
+        r"COMMITTED:\s*[a-f0-9]{7,40}",
+        r"git push.*origin",
+        r"pushed.*to.*origin",
+        r"fix.*verified",
+        r"fix.*confirmed",
+        r"successfully.*fixed",
+        r"fix.*committed",
+    ]
+    for pattern in success_markers:
+        if re.search(pattern, result_text or "", re.IGNORECASE):
+            set_job(job_id, status="completed", exit_code=exit_code,
+                    note="process killed by signal but agent completed its work")
+            return
+
+
+def _devin_worker(job_id: str, cmd: list[str], cwd: Path) -> None:
+    set_job(job_id, status="queued", note="waiting for Devin slot (max 3 concurrent)")
+    t0 = time.time()
+    job_meta = get_job(job_id) or {}
+    model = job_meta.get("model") or "unknown"
+    purpose = job_meta.get("purpose") or "devin_job"
+    # Soft throttle against estimated free-tier + external CLIs
+    try:
+        from lib import devin_usage as dusage
+        throttle, reason = dusage.USAGE.should_throttle()
+        if throttle:
+            set_job(job_id, note=f"waiting: devin quota pressure ({reason})")
+            waited = 0.0
+            while waited < 120 and throttle:
+                time.sleep(5)
+                waited += 5
+                throttle, reason = dusage.USAGE.should_throttle()
+            if throttle:
+                set_job(
+                    job_id,
+                    status="failed",
+                    error=f"devin free-tier pressure high ({reason}); try later",
+                    exit_code=-1,
+                )
+                return
+    except Exception:
+        pass
+    with _DEVIN_SEMAPHORE:
+        set_job(job_id, status="running", note="")
+        run_subprocess_job(job_id, cmd, cwd)
+    log_path = JOBS / f"{job_id}.log"
+    text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    parts = text.split("\n\n", 1)
+    body = parts[1] if len(parts) > 1 else text
+    set_job(job_id, result_text=body[-20000:])
+    _agent_status_from_result(job_id, body)
+    _maybe_capture_cannot_fix_lesson(job_id)
+    try:
+        from lib import devin_usage as dusage
+        final = get_job(job_id) or {}
+        ok = final.get("status") == "completed"
+        prompt_est = ""
+        pp = JOBS / f"{job_id}.prompt.txt"
+        if pp.exists():
+            prompt_est = pp.read_text(encoding="utf-8", errors="replace")[:50000]
+        dusage.record_studio_call(
+            model,
+            prompt_est,
+            body if ok else "",
+            ok=ok,
+            purpose=purpose,
+            run_id=job_id,
+            duration_secs=round(time.time() - t0, 3),
+            error=None if ok else str(final.get("error") or final.get("status")),
+        )
+    except Exception:
+        pass
+
+
+# ── Agy (Google Antigravity CLI) ─────────────────────────────────────────────
+
+
+@app.post("/api/projects/{pid}/agy/run")
+def api_agy_run(pid: str, body: AgyRunRequest):
+    if not AGY_BIN.exists():
+        raise HTTPException(500, "agy binary not found")
+    job_id = uuid.uuid4().hex[:12]
+    skill_ctx = _skill_context_for_prompt(pid) if getattr(body, "include_skill", True) else ""
+    notes_ctx = _notes_context_for_prompt(pid)
+    mem_ctx = _memory_context_for_prompt(body.prompt, pid) if getattr(body, "include_memory", True) else ""
+    full_ctx = (skill_ctx + notes_ctx + mem_ctx).strip()
+    prompt = (full_ctx + "\n\n" + body.prompt.strip()) if full_ctx else body.prompt.strip()
+    prompt_path = JOBS / f"{job_id}.prompt.txt"
+    prompt_path.write_text(prompt)
+    cwd = PROJECTS_ROOT / pid
+    cmd = [
+        str(AGY_BIN), "--print", prompt,
+        "--model", body.model,
+        "--mode", body.mode,
+        "--dangerously-skip-permissions",
+        "--print-timeout", "25m",
+    ]
+    set_job(job_id, status="queued", kind="agy", project=pid, purpose=body.purpose,
+            model=body.model, mode=body.mode,
+            notes_injected=len(PM.open_notes(pid)), skill_injected=len(skill_ctx))
+    threading.Thread(target=_agy_worker, args=(job_id, cmd, cwd), daemon=True).start()
+    return {"job_id": job_id, "status": "queued", "model": body.model,
+            "notes_injected": len(PM.open_notes(pid)), "skill_injected": len(skill_ctx)}
+
+
+def _agy_worker(job_id: str, cmd: list[str], cwd: Path) -> None:
+    run_subprocess_job(job_id, cmd, cwd)
+    log_path = JOBS / f"{job_id}.log"
+    text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    parts = text.split("\n\n", 1)
+    body = parts[1] if len(parts) > 1 else text
+    set_job(job_id, result_text=body[-20000:])
+    _agent_status_from_result(job_id, body)
+    _maybe_capture_cannot_fix_lesson(job_id)
+
+
+# ── Cerebras (free, fast inference) ──────────────────────────────────────────
+
+
+@app.post("/api/projects/{pid}/cerebras/run")
+def api_cerebras_run(pid: str, body: CerebrasRunRequest):
+    if not llm.has_cerebras_key():
+        raise HTTPException(500, "CEREBRAS_API_KEY not set in dev-studio/.env")
+    job_id = uuid.uuid4().hex[:12]
+    skill_ctx = _skill_context_for_prompt(pid) if getattr(body, "include_skill", True) else ""
+    notes_ctx = _notes_context_for_prompt(pid)
+    mem_ctx = _memory_context_for_prompt(body.prompt, pid) if getattr(body, "include_memory", True) else ""
+    full_ctx = (skill_ctx + notes_ctx + mem_ctx).strip()
+    prompt = (full_ctx + "\n\n" + body.prompt.strip()) if full_ctx else body.prompt.strip()
+    (JOBS / f"{job_id}.prompt.txt").write_text(prompt)
+    set_job(job_id, status="queued", kind="cerebras", project=pid, purpose=body.purpose,
+            model=body.model, notes_injected=len(PM.open_notes(pid)), skill_injected=len(skill_ctx))
+    threading.Thread(target=_cerebras_worker, args=(job_id, prompt, body.model), daemon=True).start()
+    return {"job_id": job_id, "status": "queued", "model": body.model,
+            "notes_injected": len(PM.open_notes(pid)), "skill_injected": len(skill_ctx)}
+
+
+def _cerebras_worker(job_id: str, prompt: str, model: str) -> None:
+    set_job(job_id, status="running")
+    log_path = JOBS / f"{job_id}.log"
+    cancelled = False
+    try:
+        client, key_id = llm.make_cerebras_client()
+        system_msg = ("You are a fast, focused coding agent fixing bugs in a web app. "
+                      "Read the code, diagnose the root cause, propose the smallest correct fix, "
+                      "and output the fix as a unified diff or clear instructions. Be concise.")
+        with open(log_path, "w") as log:
+            log.write(f"$ cerebras chat model={model} key={key_id}\n\n")
+            log.flush()
+            stream = client.chat.completions.create(
+                messages=[{"role": "system", "content": system_msg},
+                          {"role": "user", "content": prompt}],
+                model=model, stream=True, max_completion_tokens=8192, temperature=0.2,
+            )
+            full = []
+            in_reasoning = False
+            for chunk in stream:
+                with _cancel_flags_lock:
+                    if job_id in _cancel_flags:
+                        cancelled = True
+                        break
+                choice = chunk.choices[0]
+                delta = choice.delta
+                reasoning = getattr(delta, "reasoning_content", None) or ""
+                content = getattr(delta, "content", None) or ""
+                if reasoning:
+                    if not in_reasoning:
+                        log.write("\n[reasoning] ")
+                        in_reasoning = True
+                    log.write(reasoning)
+                    log.flush()
+                    full.append(reasoning)
+                if content:
+                    if in_reasoning:
+                        log.write("\n[response] ")
+                        in_reasoning = False
+                    log.write(content)
+                    log.flush()
+                    full.append(content)
+            text = "".join(full)
+            if cancelled:
+                log.write("\n\n[stopped by user]\n")
+        if cancelled:
+            set_job(job_id, status="failed", error="stopped by user",
+                    result_text=text[-20000:])
+        else:
+            set_job(job_id, status="completed", result_text=text[-20000:])
+            _maybe_capture_cannot_fix_lesson(job_id)
+    except Exception as e:
+        set_job(job_id, status="failed", error=str(e)[:500])
+        with open(log_path, "a") as log:
+            log.write(f"\n\nERROR: {e}\n")
+    finally:
+        with _cancel_flags_lock:
+            _cancel_flags.discard(job_id)
+
+
+@app.post("/api/jobs/{job_id}/check-and-learn")
+def api_job_check_and_learn(job_id: str):
+    if not llm.has_cerebras_key():
+        raise HTTPException(500, "CEREBRAS_API_KEY not set in dev-studio/.env")
+    job = get_job(job_id)
+    log_path = JOBS / f"{job_id}.log"
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")[-20000:] if log_path.exists() else ""
+    prompt_path = JOBS / f"{job_id}.prompt.txt"
+    prompt_text = prompt_path.read_text(encoding="utf-8", errors="replace")[-8000:] if prompt_path.exists() else ""
+    investigation = (
+        "You are investigating a failed agentic job to extract a reusable lesson.\n\n"
+        f"## Failed job\n"
+        f"- id: {job.get('id')}\n"
+        f"- kind: {job.get('kind')}\n"
+        f"- purpose: {job.get('purpose')}\n"
+        f"- model: {job.get('model')}\n"
+        f"- status: {job.get('status')}\n"
+        f"- exit_code: {job.get('exit_code')}\n"
+        f"- error: {job.get('error') or ''}\n"
+        f"- note: {job.get('note') or ''}\n\n"
+        f"## Original prompt (truncated)\n{prompt_text}\n\n"
+        f"## Job log (truncated)\n{log_text}\n\n"
+        f"## Result text (truncated)\n{(job.get('result_text') or '')[-4000:]}\n\n"
+        "Investigate and answer concisely:\n"
+        "1. ROOT CAUSE: why did this job fail or zombie?\n"
+        "2. LOG INTERPRETATION: what do the log lines actually tell us?\n"
+        "3. LESSON: a one-line reusable lesson for the agentic harness.\n"
+        "4. NEXT ACTION: a concrete next step the user should take.\n"
+        "End with a line: LESSON: <one-line lesson>\n"
+    )
+    new_id = uuid.uuid4().hex[:12]
+    (JOBS / f"{new_id}.prompt.txt").write_text(investigation)
+    set_job(new_id, status="queued", kind="cerebras", project=job.get("project") or "",
+            purpose=f"check-and-learn:{job_id}", model="gemma-4-31b",
+            notes_injected=0, parent_job=job_id)
+    threading.Thread(target=_cerebras_worker, args=(new_id, investigation, "gemma-4-31b"),
+                     daemon=True).start()
+    return {"job_id": new_id, "parent_job": job_id, "status": "queued", "model": "gemma-4-31b"}
+
+
+# ── Pi agent (mariozechner/pi-coding-agent, Cerebras-backed) ─────────────────
+
+
+@app.post("/api/projects/{pid}/pi/run")
+def api_pi_run(pid: str, body: PiRunRequest):
+    if not PI_BIN.exists():
+        raise HTTPException(500, "pi binary not found at " + str(PI_BIN))
+    if not llm.has_cerebras_key():
+        raise HTTPException(500, "CEREBRAS_API_KEY not set in dev-studio/.env (pi uses Cerebras)")
+    job_id = uuid.uuid4().hex[:12]
+    skill_ctx = _skill_context_for_prompt(pid) if getattr(body, "include_skill", True) else ""
+    notes_ctx = _notes_context_for_prompt(pid)
+    mem_ctx = _memory_context_for_prompt(body.prompt, pid) if getattr(body, "include_memory", True) else ""
+    full_ctx = (skill_ctx + notes_ctx + mem_ctx).strip()
+    prompt = (full_ctx + "\n\n" + body.prompt.strip()) if full_ctx else body.prompt.strip()
+    prompt_path = JOBS / f"{job_id}.prompt.txt"
+    prompt_path.write_text(prompt)
+    cmd = [
+        str(PI_BIN), "--print", "--provider", "cerebras", "--model", body.model,
+        "--no-tools", "--no-session", "--no-extensions", "--no-skills",
+    ]
+    set_job(job_id, status="queued", kind="pi", project=pid, purpose=body.purpose,
+            model=body.model, notes_injected=len(PM.open_notes(pid)), skill_injected=len(skill_ctx))
+    threading.Thread(target=_pi_worker, args=(job_id, cmd, prompt), daemon=True).start()
+    return {"job_id": job_id, "status": "queued", "model": body.model,
+            "notes_injected": len(PM.open_notes(pid)), "skill_injected": len(skill_ctx)}
+
+
+def _pi_worker(job_id: str, cmd: list[str], prompt: str) -> None:
+    set_job(job_id, status="running", cmd=cmd, cwd=str(ROOT))
+    log_path = JOBS / f"{job_id}.log"
+    try:
+        full_env = os.environ.copy()
+        for keyfile in (Path.home() / ".config" / "elicit" / "env", ROOT / ".env.elicit", STUDIO / ".env"):
+            if keyfile.is_file():
+                for line in keyfile.read_text().splitlines():
+                    if "=" in line and not line.strip().startswith("#"):
+                        k, v = line.split("=", 1)
+                        full_env.setdefault(k.strip(), v.strip().strip("'\""))
+        with open(log_path, "w") as log:
+            log.write(f"$ {' '.join(cmd)} < prompt.txt\n\n")
+            log.flush()
+            proc = subprocess.run(cmd, cwd=str(ROOT), env=full_env, stdout=log,
+                                  stderr=subprocess.STDOUT, text=True, input=prompt,
+                                  timeout=60 * 10)
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        parts = text.split("\n\n", 1)
+        result = parts[1] if len(parts) > 1 else text
+        set_job(job_id, status="completed" if proc.returncode == 0 else "failed",
+                exit_code=proc.returncode, result_text=result[-20000:])
+        _agent_status_from_result(job_id, result)
+        _maybe_capture_cannot_fix_lesson(job_id)
+    except subprocess.TimeoutExpired:
+        set_job(job_id, status="failed", error="timeout", log_path=str(log_path))
+    except Exception as e:
+        set_job(job_id, status="failed", error=str(e)[:500])
+
+
+# ── costs ────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/jobs/archive")
+def api_jobs_archive():
+    """Return all jobs with their logs + prompts inlined."""
+    _cleanup_zombie_jobs()
+    files = sorted(JOBS.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    out = []
+    for p in files:
+        try:
+            j = json.loads(p.read_text())
+        except Exception:
+            continue
+        if "prompt" not in j:
+            pp = JOBS / f"{j['id']}.prompt.txt"
+            if pp.exists():
+                j["prompt"] = pp.read_text(encoding="utf-8", errors="replace")
+        log_path = JOBS / f"{j['id']}.log"
+        if log_path.exists():
+            j["log"] = log_path.read_text(encoding="utf-8", errors="replace")[-50000:]
+        out.append(j)
+    return out
+
+
+@app.get("/api/jobs/{job_id}")
+def api_job(job_id: str):
+    return get_job(job_id)
+
+
+@app.get("/api/jobs")
+def api_jobs():
+    _cleanup_zombie_jobs()
+    files = sorted(JOBS.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:80]
+    out = []
+    for p in files:
+        j = json.loads(p.read_text())
+        if "prompt" not in j:
+            pp = JOBS / f"{j['id']}.prompt.txt"
+            if pp.exists():
+                j["prompt"] = pp.read_text(encoding="utf-8", errors="replace")[:300]
+        out.append(j)
+    return out
+
+
+@app.post("/api/jobs/clear")
+def api_jobs_clear():
+    """Remove completed/failed job files (keeps running + queued)."""
+    removed = 0
+    for p in JOBS.glob("*.json"):
+        try:
+            j = json.loads(p.read_text())
+            if j.get("status") in ("completed", "failed"):
+                p.unlink()
+                for ext in (".log", ".prompt.txt"):
+                    fp = JOBS / f"{j['id']}{ext}"
+                    if fp.exists(): fp.unlink()
+                removed += 1
+        except Exception:
+            pass
+    return {"removed": removed}
+
+
+@app.post("/api/jobs/{job_id}/verify")
+def api_job_verify(job_id: str):
+    """Manually mark a job's bug as actually fixed and capture a lesson."""
+    job = get_job(job_id)
+    set_job(job_id, verified=True, status="completed",
+            note="user verified this fix is correct")
+    _capture_lesson(job)
+    return {"ok": True, "job_id": job_id, "verified": True}
+
+
+@app.post("/api/jobs/{job_id}/stop")
+def api_job_stop(job_id: str):
+    """Stop a running job. Kills the underlying subprocess or signals the
+    in-process Cerebras SDK stream to abort at the next chunk."""
+    job = get_job(job_id)
+    if job.get("status") not in ("running", "queued"):
+        raise HTTPException(400, f"job is {job.get('status')}, not running")
+    with _cancel_flags_lock:
+        _cancel_flags.add(job_id)
+    with _running_procs_lock:
+        proc = _running_procs.get(job_id)
+    if proc and proc.poll() is None:
+        try: proc.terminate()
+        except Exception: pass
+    set_job(job_id, note="stop requested by user")
+    return {"ok": True, "job_id": job_id, "stopped": True}
+
+
+class UsefulRequest(BaseModel):
+    useful: bool
+
+
+@app.post("/api/jobs/{job_id}/useful")
+def api_job_useful(job_id: str, body: UsefulRequest):
+    """Mark whether a completed agent job's prompt was actually useful."""
+    get_job(job_id)
+    set_job(job_id, useful=body.useful, useful_marked_at=utcnow())
+    return {"ok": True, "job_id": job_id, "useful": body.useful}
+
+
+@app.post("/api/jobs/{job_id}/unverify")
+def api_job_unverify(job_id: str):
+    """Mark a completed/verified job as NOT actually completed."""
+    get_job(job_id)
+    set_job(job_id, verified=False, status="not-completed",
+            note="user marked this fix as not completed")
+    return {"ok": True, "job_id": job_id, "verified": False,
+            "status": "not-completed"}
+
+
+class EscalateRequest(BaseModel):
+    agent: str
+    model: Optional[str] = None
+    extra_context: Optional[str] = None
+
+
+@app.post("/api/jobs/{job_id}/escalate")
+def api_job_escalate(job_id: str, body: EscalateRequest):
+    """Re-dispatch a not-completed/failed job's original prompt to a different agent."""
+    job = get_job(job_id)
+    pid = job.get("project") or ""
+    if not pid:
+        raise HTTPException(400, "original job has no project; cannot escalate")
+    prompt_path = JOBS / f"{job_id}.prompt.txt"
+    if not prompt_path.exists():
+        raise HTTPException(400, "original prompt not found; cannot escalate")
+    base_prompt = prompt_path.read_text(encoding="utf-8", errors="replace")
+    marker = "## Factory skill context"
+    if marker in base_prompt:
+        base_prompt = base_prompt.split(marker, 1)[0].rstrip()
+    if body.extra_context:
+        base_prompt += (
+            "\n\n## Why the previous attempt did not resolve the bug\n"
+            f"{body.extra_context.strip()}\n"
+            "Address this reason specifically and propose a different approach than whatever was tried before.\n"
+        )
+    agent = (body.agent or "").lower()
+    new_id = uuid.uuid4().hex[:12]
+    purpose = job.get("purpose") or "general"
+    if agent == "devin":
+        if not DEVIN_BIN.exists():
+            raise HTTPException(500, "devin binary not found")
+        model = body.model or "glm-5.2-high"
+        np = JOBS / f"{new_id}.prompt.txt"
+        np.write_text(base_prompt)
+        cmd = [str(DEVIN_BIN), "--print", "--prompt-file", str(np),
+               "--model", model, "--permission-mode", "dangerous"]
+        set_job(new_id, status="queued", kind="devin", project=pid, purpose=purpose,
+                model=model, permission_mode="dangerous",
+                notes_injected=job.get("notes_injected", 0),
+                skill_injected=job.get("skill_injected", 0),
+                escalated_from=job_id)
+        threading.Thread(target=_devin_worker, args=(new_id, cmd, PROJECTS_ROOT / pid), daemon=True).start()
+    elif agent == "cerebras":
+        if not llm.has_cerebras_key():
+            raise HTTPException(500, "CEREBRAS_API_KEY not set in dev-studio/.env")
+        model = body.model or "gemma-4-31b"
+        (JOBS / f"{new_id}.prompt.txt").write_text(base_prompt)
+        set_job(new_id, status="queued", kind="cerebras", project=pid, purpose=purpose,
+                model=model, notes_injected=job.get("notes_injected", 0),
+                skill_injected=job.get("skill_injected", 0),
+                escalated_from=job_id)
+        threading.Thread(target=_cerebras_worker, args=(new_id, base_prompt, model),
+                         daemon=True).start()
+    elif agent == "pi":
+        if not PI_BIN.exists():
+            raise HTTPException(500, "pi binary not found at " + str(PI_BIN))
+        if not llm.has_cerebras_key():
+            raise HTTPException(500, "CEREBRAS_API_KEY not set in dev-studio/.env (pi uses Cerebras)")
+        model = body.model or "gpt-oss-120b"
+        (JOBS / f"{new_id}.prompt.txt").write_text(base_prompt)
+        cmd = [str(PI_BIN), "--print", "--provider", "cerebras", "--model", model,
+               "--no-tools", "--no-session", "--no-extensions", "--no-skills"]
+        set_job(new_id, status="queued", kind="pi", project=pid, purpose=purpose,
+                model=model, notes_injected=job.get("notes_injected", 0),
+                skill_injected=job.get("skill_injected", 0),
+                escalated_from=job_id)
+        threading.Thread(target=_pi_worker, args=(new_id, cmd, base_prompt),
+                         daemon=True).start()
+    else:
+        raise HTTPException(400, f"unknown agent '{agent}' (expected devin|cerebras|pi)")
+    set_job(job_id, escalated_to=new_id)
+    return {"ok": True, "job_id": new_id, "escalated_from": job_id,
+            "agent": agent, "model": body.model}
+
+
+class RecommendReasonsRequest(BaseModel):
+    note_id: str
+    job_id: Optional[str] = None
+    model: str = "gemma-4-31b"
+
+
+@app.get("/api/jobs/{job_id}/log")
+def api_job_log(job_id: str):
+    p = JOBS / f"{job_id}.log"
+    if not p.exists():
+        raise HTTPException(404, "no log")
+    return {"log": p.read_text(encoding="utf-8", errors="replace")[-50000:]}
+
+
+@app.get("/api/jobs/{job_id}/stream")
+def api_job_stream(job_id: str):
+    """SSE endpoint that streams live log lines for a job."""
+    log_path = JOBS / f"{job_id}.log"
+
+    def event_stream():
+        import time as _time
+        offset = 0
+        if log_path.exists():
+            content = log_path.read_text(encoding="utf-8", errors="replace")
+            if len(content) > 2000:
+                offset = len(content) - 2000
+                yield f"data: {json.dumps({'type': 'history', 'text': content[:2000]})}\n\n"
+            else:
+                offset = 0
+        last_status = None
+        empty_ticks = 0
+        while True:
+            try:
+                job = get_job(job_id)
+                status = job.get("status")
+            except Exception:
+                status = "unknown"
+            if status != last_status:
+                yield f"data: {json.dumps({'type': 'status', 'status': status})}\n\n"
+                last_status = status
+            if log_path.exists():
+                try:
+                    content = log_path.read_text(encoding="utf-8", errors="replace")
+                    if len(content) > offset:
+                        new_text = content[offset:]
+                        offset = len(content)
+                        yield f"data: {json.dumps({'type': 'log', 'text': new_text})}\n\n"
+                        empty_ticks = 0
+                    else:
+                        empty_ticks += 1
+                except Exception:
+                    pass
+            if status in ("completed", "failed"):
+                empty_ticks += 1
+                if empty_ticks > 3:
+                    yield f"data: {json.dumps({'type': 'done', 'status': status})}\n\n"
+                    break
+            _time.sleep(0.5)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ── lessons ──────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/lessons")
+def api_lessons():
+    if not LESSONS_FILE.exists():
+        return {"lessons": []}
+    try: return {"lessons": json.loads(LESSONS_FILE.read_text())}
+    except: return {"lessons": []}
+
+
+# ── notes (bug annotations) ──────────────────────────────────────────────────
+
+
+def _notes_context_for_prompt(pid: str) -> str:
+    """Build a context block of open notes to inject into agent/devin/grok prompts.
+    Also includes recent lessons from verified fixes."""
+    notes = PM.open_notes(pid)
+    if not notes:
+        return ""
+    lessons_block = ""
+    if LESSONS_FILE.exists():
+        try:
+            lessons = json.loads(LESSONS_FILE.read_text())
+            recent = lessons[-5:]
+            if recent:
+                lessons_block = "\n## Recent lessons from verified fixes (learn from these patterns)\n"
+                for l in recent:
+                    lessons_block += f"- [{l.get('kind')}/{l.get('model')}] {l.get('approach','')[:200]}\n"
+        except: pass
+    lines = [
+        "## Open bug notes (user-annotated on the page — address these & infer previous context)",
+        "- Note to agent: Infer relationships and context across these notes (e.g. if multiple notes mention component sizing, position, tabs, or UI state, combine this context)."
+    ]
+    for i, n in enumerate(notes, 1):
+        ctx = n.get("page_context") or {}
+        ctx_str = ""
+        if ctx.get("tab"): ctx_str += f" tab={ctx['tab']}"
+        if ctx.get("cell_id"): ctx_str += f" cell={ctx['cell_id']}"
+        if ctx.get("project"): ctx_str += f" project={ctx['project']}"
+        html_snip = (n.get("element_html") or "")[:200].replace("\n", " ")
+        imgs = n.get("images") or []
+        img_note = f"\n   images: {len(imgs)} screenshot(s) attached" if imgs else ""
+        lines.append(f"{i}. [{n.get('severity','bug')}] {n.get('note','')}"
+                     f"\n   selector: {n.get('selector','')}"
+                     f"\n   element: <{n.get('element_tag','')}> {(n.get('element_text','') or '')[:80]}"
+                     f"\n   html: {html_snip}"
+                     f"\n   context:{ctx_str} (note id {n.get('id')}){img_note}")
+        for j, img in enumerate(imgs[:3]):
+            if isinstance(img, str) and img.startswith("data:image/"):
+                lines.append(f"   [image {j+1}]: {img[:8192]}{'...(truncated)' if len(img) > 8192 else ''}")
+    return "\n".join(lines) + "\n\n" + lessons_block
+
+
+@app.get("/api/projects/{pid}/notes")
+def api_notes_list(pid: str):
+    return {"notes": PM.load_notes(pid), "open_count": len(PM.open_notes(pid))}
+
+
+@app.post("/api/projects/{pid}/notes")
+def api_notes_create(pid: str, body: NoteCreate):
+    note = PM.add_note(pid, body.model_dump())
+    return note
+
+
+@app.patch("/api/projects/{pid}/notes/{nid}")
+def api_notes_update(pid: str, nid: str, body: NoteUpdate):
+    updated = PM.update_note(pid, nid, body.model_dump(exclude_unset=True))
+    if not updated:
+        raise HTTPException(404, "note not found")
+    return updated
+
+
+@app.delete("/api/projects/{pid}/notes/{nid}")
+def api_notes_delete(pid: str, nid: str):
+    if not PM.delete_note(pid, nid):
+        raise HTTPException(404, "note not found")
+    return {"ok": True}
+
+
+# ── skill package ─────────────────────────────────────────────────────────────
+
+
+@app.get("/api/projects/{pid}/skill")
+def api_skill_get(pid: str):
+    return {"text": PM.load_skill(pid)}
+
+
+@app.put("/api/projects/{pid}/skill")
+def api_skill_put(pid: str, body: SkillUpdate):
+    PM.save_skill(pid, body.text)
+    return {"ok": True}
+
+
+@app.post("/api/projects/{pid}/skill/regenerate")
+def api_skill_regenerate(pid: str, body: SkillRegenerateRequest):
+    state = PM.load_state(pid)
+    PM.ensure_skill_defaults(pid, state)
+    return {"text": PM.load_skill(pid), "references": PM.list_references(pid)}
+
+
+@app.get("/api/projects/{pid}/skill/references")
+def api_references_list(pid: str):
+    return {"references": PM.list_references(pid)}
+
+
+@app.get("/api/projects/{pid}/skill/references/{name}")
+def api_reference_get(pid: str, name: str):
+    return {"name": Path(name).name, "text": PM.load_reference(pid, Path(name).name)}
+
+
+@app.put("/api/projects/{pid}/skill/references/{name}")
+def api_reference_put(pid: str, name: str, body: ReferenceUpdate):
+    PM.save_reference(pid, Path(name).name, body.text)
+    return {"ok": True}
+
+
+@app.delete("/api/projects/{pid}/skill/references/{name}")
+def api_reference_delete(pid: str, name: str):
+    PM.delete_reference(pid, Path(name).name)
+    return {"ok": True}
+
+
+# ── archive / auto-archive ───────────────────────────────────────────────────
+
+
+def _archive_project(pid: str) -> Path:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    zip_path = ARCHIVES / f"{pid}-{ts}.zip"
+    pdir = PROJECTS_ROOT / pid
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        notes = pdir / "notes.json"
+        if notes.exists():
+            zf.write(notes, "notes.json")
+        if ELICIT_RESEARCH.exists():
+            for d in ELICIT_RESEARCH.iterdir():
+                if d.is_dir() and d.name.startswith(f"{pid}-"):
+                    for f in d.rglob("*"):
+                        if f.is_file():
+                            zf.write(f, f"elicit/{d.name}/{f.relative_to(d)}")
+        for p in JOBS.glob("*.json"):
+            try:
+                j = json.loads(p.read_text())
+            except Exception:
+                continue
+            if j.get("project") != pid:
+                continue
+            zf.write(p, f"jobs/{p.name}")
+            for ext in (".log", ".prompt.txt"):
+                fp = JOBS / f"{j['id']}{ext}"
+                if fp.exists():
+                    zf.write(fp, f"jobs/{fp.name}")
+    return zip_path
+
+
+def ensure_evo_project_workspace(evo_id: str) -> Path:
+    """Materialize evolution product HTML into projects/{evo_id}/ for bugfix agents."""
+    evo_id = (evo_id or "").strip()
+    if not evo_id:
+        raise HTTPException(400, "evolution/project id required")
+    dest = PROJECTS_ROOT / evo_id
+    dest.mkdir(parents=True, exist_ok=True)
+    # copy latest product if present
+    root = EVOLUTIONS_ROOT / evo_id
+    candidates = [
+        root / "exports" / "PRODUCT-latest.html",
+    ]
+    for g in sorted(root.glob("gen*/product/index.html"), reverse=True):
+        candidates.append(g)
+    src_html = next((p for p in candidates if p.exists()), None)
+    if src_html:
+        target = dest / "index.html"
+        try:
+            if not target.exists() or src_html.stat().st_mtime > target.stat().st_mtime:
+                import shutil as _sh
+                _sh.copy2(src_html, target)
+        except Exception:
+            pass
+    # minimal project state for notes API
+    try:
+        if not (dest / "state.json").exists():
+            PM.save_state(evo_id, {
+                "id": evo_id,
+                "name": evo_id,
+                "goal": f"Evolution product {evo_id}",
+                "template": "product",
+                "description": "Workspace for bugfix agents on Evolve product HTML",
+                "cells": [],
+                "environment": ["local"],
+                "tools": ["git", "python3"],
+            })
+        PM.ensure_skill_defaults(evo_id, PM.load_state(evo_id))
+    except Exception:
+        pass
+    return dest
+
+
+@app.post("/api/evolve/{evo_id}/workspace")
+def api_evolve_workspace(evo_id: str):
+    """Ensure a project workspace exists for bugfix agents (product HTML)."""
+    path = ensure_evo_project_workspace(evo_id)
+    return {"ok": True, "project_id": evo_id, "path": str(path), "has_index": (path / "index.html").exists()}
+
+
+@app.post("/api/projects/{pid}/recommend-reasons")
 
 
 def main():

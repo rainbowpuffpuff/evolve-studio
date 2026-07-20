@@ -1823,13 +1823,39 @@ class EvolutionEngine:
             return self.runs.get(evo_id)
 
     @staticmethod
-    def _run_summary(data: dict) -> dict:
+    def _run_summary(data: dict, evolutions_root: Optional[Path] = None) -> dict:
         """Compact history entry for the Evolve sidebar (always persisted on disk)."""
         cfg = data.get("config") or {}
         best = data.get("best") or {}
         gens = data.get("generations") or []
+        eid = data.get("id") or ""
+        has_html = False
+        product_url = None
+        exports_dir = None
+        if evolutions_root and eid:
+            root = Path(evolutions_root) / eid
+            latest = root / "exports" / "PRODUCT-latest.html"
+            if latest.is_file() and latest.stat().st_size > 50:
+                has_html = True
+                product_url = f"/api/evolve/{eid}/export/file/PRODUCT-latest.html"
+                exports_dir = str(root / "exports")
+            else:
+                # any genN/product/index.html or exports gen*-product.html
+                for cand in sorted((root / "exports").glob("*.html")) if (root / "exports").is_dir() else []:
+                    if cand.stat().st_size > 50:
+                        has_html = True
+                        product_url = f"/api/evolve/{eid}/export/file/{cand.name}"
+                        exports_dir = str(root / "exports")
+                        break
+                if not has_html:
+                    for cand in root.glob("gen*/product/index.html"):
+                        if cand.is_file() and cand.stat().st_size > 50:
+                            has_html = True
+                            rel = cand.relative_to(root).as_posix()
+                            product_url = f"/api/evolve/{eid}/product/file/{rel}"
+                            break
         return {
-            "id": data.get("id"),
+            "id": eid,
             "status": data.get("status"),
             "goal": cfg.get("goal") or "",
             "name": cfg.get("name"),
@@ -1850,25 +1876,30 @@ class EvolutionEngine:
             "stop_reason": data.get("stop_reason"),
             "llm_calls": len(data.get("llm_calls") or []),
             "cell_count": best.get("cell_count") or len(best.get("cells") or []),
-            "has_product_html": False,  # filled by list_product_seeds; keep summary lean
+            "has_product_html": has_html,
+            "product_url": product_url,
+            "exports_dir": exports_dir,
+            "persisted": True,
+            "disk_path": str(Path(evolutions_root) / eid) if evolutions_root and eid else None,
         }
 
     def list_runs(self, evolutions_root: Optional[Path] = None, full: bool = False) -> list[dict]:
         """List all evolutions. By default merges on-disk history (always saved) with in-memory runs."""
         by_id: dict[str, dict] = {}
-        if evolutions_root and Path(evolutions_root).exists():
-            for p in Path(evolutions_root).glob("*/evolution.json"):
+        root = Path(evolutions_root) if evolutions_root else None
+        if root and root.exists():
+            for p in root.glob("*/evolution.json"):
                 try:
                     data = json.loads(p.read_text(encoding="utf-8"))
                     eid = data.get("id") or p.parent.name
                     data["id"] = eid
-                    by_id[eid] = data if full else self._run_summary(data)
+                    by_id[eid] = data if full else self._run_summary(data, root)
                 except Exception:
                     continue
         with self._runs_lock:
             for r in self.runs.values():
                 data = r._to_dict()
-                by_id[r.id] = data if full else self._run_summary(data)
+                by_id[r.id] = data if full else self._run_summary(data, root)
         runs = list(by_id.values())
         runs.sort(key=lambda d: d.get("updated_at") or d.get("created_at") or "", reverse=True)
         return runs

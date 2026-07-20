@@ -4543,6 +4543,7 @@ Be concise. Make the fix, verify, commit, push, confirm.`;
 
     async function loadEvolveOptions() {
       // Re-fetch so OpenRouter free models stay in Primary/Planner/Director dropdowns
+      const hintEl = $('#evolveWorkerPoolHint');
       try {
         const opts = await api('/api/evolve/options');
         state.evolveOptions = opts;
@@ -4627,6 +4628,23 @@ Be concise. Make the fix, verify, commit, push, confirm.`;
         fillExportAgentDropdowns();
       } catch (e) {
         console.warn('evolve options', e);
+        if (hintEl) {
+          hintEl.textContent = `Worker pool: failed to load options (${e.message || e}). Refresh page or check /api/evolve/options.`;
+          hintEl.style.color = 'var(--crisis)';
+        }
+        // Minimal fallback so Primary/Planner aren't empty
+        const planSel = $('#evolvePlanner');
+        if (planSel && planSel.options.length < 3) {
+          planSel.innerHTML = `
+            <option value="cerebras:gemma-4-31b">Cerebras · gemma-4-31b</option>
+            <option value="cerebras:zai-glm-4.7">Cerebras · zai-glm-4.7</option>
+            <option value="devin:glm-5-2">Devin · GLM-5.2 High (free)</option>
+            <option value="devin:swe-1-7">Devin · SWE-1.7 Max (free)</option>`;
+        }
+        const dmSel = $('#evolveDecisionMaker');
+        if (dmSel && dmSel.options.length < 3) {
+          dmSel.innerHTML = planSel ? planSel.innerHTML : '';
+        }
       }
     }
 
@@ -5286,9 +5304,10 @@ Be concise. Make the fix, verify, commit, push, confirm.`;
         const r = await api('/api/evolve');
         const evolutions = r.evolutions || r || [];
         state.evolveHistory = Array.isArray(evolutions) ? evolutions : [];
-        if (meta) meta.textContent = `${state.evolveHistory.length} saved · auto-persisted`;
+        const withHtml = state.evolveHistory.filter(e => e.has_product_html).length;
+        if (meta) meta.textContent = `${state.evolveHistory.length} on disk · ${withHtml} with HTML · survives restart`;
         if (!state.evolveHistory.length) {
-          list.innerHTML = '<div class="evo-hist-empty">No evolutions yet.<br/>Start one — it will stay here.</div>';
+          list.innerHTML = '<div class="evo-hist-empty">No evolutions yet.<br/>Start one — saved under data/evolutions/.</div>';
           return;
         }
         list.innerHTML = state.evolveHistory.map(e => {
@@ -5300,16 +5319,24 @@ Be concise. Make the fix, verify, commit, push, confirm.`;
           const pillCls = st === 'completed' ? 'ok' : (st === 'failed' ? 'bad' : (st === 'stopped' || st === 'stopping' ? 'warn' : 'run'));
           const live = st === 'running' || st === 'queued' || st === 'stopping';
           const resumable = st === 'stopped' || st === 'failed';
-          return `<div class="evo-hist-item ${active}" data-evo-id="${esc(e.id)}" title="${esc(e.id)}">
+          const htmlPill = e.has_product_html
+            ? `<span class="pill ok" style="font-size:.62rem;padding:0 .3rem" title="Product HTML on disk">HTML</span>`
+            : '';
+          const htmlLink = (e.has_product_html && e.product_url)
+            ? `<a class="small" href="${esc(e.product_url)}" target="_blank" rel="noopener" style="margin-top:.25rem;display:inline-block;font-size:.66rem">Open product HTML</a>`
+            : '';
+          return `<div class="evo-hist-item ${active}" data-evo-id="${esc(e.id)}" title="${esc(e.disk_path || e.id)}">
             <button type="button" class="eh-open" data-evo-open="${esc(e.id)}" style="all:unset;cursor:pointer;display:block;width:100%">
               <div class="eh-goal">${esc(goal)}</div>
               <div class="eh-meta">
                 <span class="pill ${pillCls}" style="font-size:.62rem;padding:0 .3rem">${esc(st)}</span>
+                ${htmlPill}
                 ${fit ? ` · ${esc(fit)}` : ''} · ${formatEvoWhen(e.updated_at || e.created_at)}
                 ${model ? `<br/>${model}` : ''}
                 ${e.promoted_project_id ? `<br/>→ ${esc(e.promoted_project_id)}` : ''}
               </div>
             </button>
+            ${htmlLink}
             ${live ? `<button type="button" class="small danger eh-stop" data-evo-stop="${esc(e.id)}" title="Stop run and save progress" style="margin-top:.3rem;font-size:.66rem;width:100%">Stop · save</button>` : ''}
             ${resumable ? `<button type="button" class="small primary eh-resume" data-evo-resume="${esc(e.id)}" title="Resume from next incomplete generation" style="margin-top:.3rem;font-size:.66rem;width:100%">▶ Resume</button>` : ''}
           </div>`;
