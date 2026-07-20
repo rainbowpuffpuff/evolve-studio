@@ -4,46 +4,75 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Evolve Studio</title>
+  <script>
+    // Apply theme before paint to avoid flash
+    (function () {
+      try {
+        var t = localStorage.getItem('evolve.theme');
+        if (!t) t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    })();
+  </script>
   <style>
     :root {
       --bg: #f4f7f1; --ink: #1f241f; --muted: #667066; --card: #fff; --line: #d0d8cc;
       --hero: #2f5d3a; --acid: #d7e676; --crisis: #a94438; --psych: #3d4f8f;
       --warn: #8a6d1d; --shadow: 0 8px 24px rgba(0,0,0,.08); --radius: 14px;
+      --header-bg: rgba(255,255,255,.92);
+      --soft: #f7faf4; --soft2: #eef4ea; --soft3: #fafbf8; --chip: #e7f3ea;
+      --chip-line: #b7d2bf; --input-bg: #fbfcf9; --glow: #e8f2df;
+      --hero-fg: #fff; --code-bg: #f0f4ec;
+    }
+    html[data-theme="dark"] {
+      --bg: #121612; --ink: #e6ebe3; --muted: #9aa89a; --card: #1a1f1a; --line: #2c352c;
+      --hero: #7dba88; --acid: #c5d65a; --crisis: #e07a6e; --psych: #8fa0d8;
+      --warn: #e0c06a; --shadow: 0 10px 28px rgba(0,0,0,.45); --radius: 14px;
+      --header-bg: rgba(18,22,18,.92);
+      --soft: #1e241e; --soft2: #242b24; --soft3: #171c17; --chip: #243028;
+      --chip-line: #3a4d3e; --input-bg: #151a15; --glow: #1a2a1c;
+      --hero-fg: #0f140f; --code-bg: #1e261e;
+      color-scheme: dark;
     }
     * { box-sizing: border-box; }
     html { overflow-x: clip; max-width: 100%; width: 100%; }
     body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; color: var(--ink);
-      background: radial-gradient(900px 420px at 0% 0%, #e8f2df, transparent 55%), var(--bg); line-height: 1.45;
-      overflow-x: clip; max-width: 100%; width: 100%; min-width: 0; }
+      background: radial-gradient(900px 420px at 0% 0%, var(--glow), transparent 55%), var(--bg); line-height: 1.45;
+      overflow-x: clip; max-width: 100%; width: 100%; min-width: 0;
+      transition: background .2s ease, color .15s ease; }
     img, video, canvas, svg, iframe { max-width: 100%; height: auto; }
     pre, code, .agent-out, pre.out { max-width: 100%; overflow-x: auto; word-break: break-word; overflow-wrap: anywhere; }
     table { max-width: 100%; }
     .table-scroll { width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
     header { padding: .65rem 1rem; border-bottom: 1px solid var(--line);
-      background: rgba(255,255,255,.92); backdrop-filter: blur(8px);
+      background: var(--header-bg); backdrop-filter: blur(8px);
       position: sticky; top: 0; z-index: 50;
       display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; justify-content: space-between;
       max-width: 100%; min-width: 0; width: 100%; }
     header h1 { margin: 0; font-size: 1.15rem; letter-spacing: -.02em; }
     header .meta { color: var(--muted); font-size: .85rem; }
-    header .folder { font-family: monospace; font-size: .78rem; color: var(--hero); background: #e7f3ea;
-      border: 1px solid #b7d2bf; border-radius: 6px; padding: .15rem .45rem; max-width: min(380px, 100%);
+    header .folder { font-family: monospace; font-size: .78rem; color: var(--hero); background: var(--chip);
+      border: 1px solid var(--chip-line); border-radius: 6px; padding: .15rem .45rem; max-width: min(380px, 100%);
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     header .row { min-width: 0; max-width: 100%; }
     .pill { display: inline-flex; align-items: center; gap: .35rem; padding: .2rem .55rem;
-      border-radius: 999px; font-size: .75rem; font-weight: 700; border: 1px solid var(--line); background: #fff; }
-    .pill.ok { background: #e7f3ea; color: var(--hero); border-color: #b7d2bf; }
-    .pill.bad { background: #fdecea; color: var(--crisis); }
-    .pill.run { background: #eef1fb; color: var(--psych); }
-    .pill.warn { background: #fdf6e3; color: var(--warn); border-color: #ecd9a8; }
+      border-radius: 999px; font-size: .75rem; font-weight: 700; border: 1px solid var(--line); background: var(--card); }
+    .pill.ok { background: var(--chip); color: var(--hero); border-color: var(--chip-line); }
+    .pill.bad { background: color-mix(in srgb, var(--crisis) 16%, var(--card)); color: var(--crisis); }
+    .pill.run { background: color-mix(in srgb, var(--psych) 14%, var(--card)); color: var(--psych); }
+    .pill.warn { background: color-mix(in srgb, var(--warn) 16%, var(--card)); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
     select.project-select { font: inherit; font-weight: 700; padding: .35rem .5rem; border: 1px solid var(--line);
-      border-radius: 8px; background: #fff; min-width: 0; max-width: min(220px, 100%); width: auto; }
+      border-radius: 8px; background: var(--card); color: var(--ink); min-width: 0; max-width: min(220px, 100%); width: auto; }
+    #btnThemeToggle { min-width: 2.4rem; font-size: .95rem; line-height: 1; padding: .28rem .45rem; }
+    #btnThemeToggle .theme-ico { display: inline-block; }
     /* Centered app shell — never edge-to-edge on wide monitors */
     main { display: flex; flex-direction: column; gap: .75rem; padding: .75rem 1rem 2.5rem;
       max-width: min(960px, 100%); width: 100%; margin: 0 auto; min-width: 0; overflow-x: clip; }
     /* Evolve page slightly wider for history + form split */
     body.page-evolve main { max-width: min(1040px, 100%); }
-    body.page-evolve .tabs { position: sticky; top: 52px; z-index: 40; background: rgba(244,247,241,.94);
+    body.page-evolve .tabs { position: sticky; top: 52px; z-index: 40; background: color-mix(in srgb, var(--bg) 94%, transparent);
       backdrop-filter: blur(6px); padding: .35rem 0; margin: 0 0 .15rem !important; }
     .page-shell { min-width: 0; max-width: 100%; width: 100%; overflow-x: clip; }
     .tab-pane { min-width: 0; max-width: 100%; width: 100%; overflow-x: clip; }
@@ -56,7 +85,7 @@
       overflow-x: auto; width: 100%; }
     section.card h2 { margin: 0 0 .65rem; font-size: 1rem;
       display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
-    .spine { border-left: 5px solid var(--acid); background: #f7faf4; padding: .7rem .85rem;
+    .spine { border-left: 5px solid var(--acid); background: var(--soft); padding: .7rem .85rem;
       border-radius: 0 10px 10px 0; font-size: .95rem; }
     .spine textarea { width: 100%; border: 0; background: transparent; resize: vertical; font: inherit; color: inherit; min-height: 3.2rem; }
     .arc-strip { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .75rem; }
@@ -72,7 +101,7 @@
     .pipeline-bar span { background: #f0f4ec; border: 1px solid var(--line); border-radius: 6px; padding: .15rem .4rem; }
     .pipeline-bar span.active { background: var(--hero); color: #fff; border-color: var(--hero); }
     #cells { display: flex; flex-direction: column; gap: .75rem; }
-    .beat { border: 1px solid var(--line); border-radius: 12px; background: #fff; overflow: hidden;
+    .beat { border: 1px solid var(--line); border-radius: 12px; background: var(--card); overflow: hidden;
       box-shadow: 0 2px 8px rgba(0,0,0,.04); }
     .beat.dragging { opacity: .55; outline: 2px dashed var(--hero); }
     .beat.collapsed .beat-fields > *:not(.beat-head) { display: none; }
@@ -89,32 +118,32 @@
       color: var(--muted); font-weight: 700; }
     input[type=text], input[type=number], textarea, select {
       width: 100%; max-width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 8px;
-      padding: .4rem .5rem; font: inherit; background: #fbfcf9; }
+      padding: .4rem .5rem; font: inherit; background: var(--input-bg); color: var(--ink); }
     .row > label, .row > * { min-width: 0; max-width: 100%; }
     .row label.small { flex: 1 1 10rem; min-width: 0; }
     textarea { min-height: 2.6rem; resize: vertical; }
     textarea.prompt { min-height: 4.2rem; font-size: .88rem; }
-    button, .btn { border: 1px solid var(--line); background: #fff; border-radius: 9px; padding: .4rem .7rem;
+    button, .btn { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 9px; padding: .4rem .7rem;
       font: inherit; font-weight: 650; cursor: pointer; font-size: .85rem; }
-    button.primary { background: var(--hero); color: #fff; border-color: var(--hero); }
-    button.danger { background: #fdecea; color: var(--crisis); border-color: #efc1b8; }
-    button.psych { background: #eef1fb; color: var(--psych); border-color: #c7d0f0; }
+    button.primary { background: var(--hero); color: var(--hero-fg); border-color: var(--hero); }
+    button.danger { background: color-mix(in srgb, var(--crisis) 16%, var(--card)); color: var(--crisis); border-color: color-mix(in srgb, var(--crisis) 35%, var(--line)); }
+    button.psych { background: color-mix(in srgb, var(--psych) 14%, var(--card)); color: var(--psych); border-color: color-mix(in srgb, var(--psych) 35%, var(--line)); }
     button:disabled { opacity: .5; cursor: not-allowed; }
     button.small { padding: .28rem .5rem; font-size: .78rem; }
     .job { border: 1px solid var(--line); border-radius: 10px; padding: .55rem .65rem; margin: .4rem 0;
-      font-size: .82rem; background: #fafbf8; }
+      font-size: .82rem; background: var(--soft3); }
     .job .kind { font-weight: 800; text-transform: uppercase; font-size: .68rem; color: var(--muted); }
     .kanban { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: .6rem; margin-top: .4rem; max-width: 100%; min-width: 0; }
-    .kanban-col { background: #fafbf8; border: 1px solid var(--line); border-radius: 12px; padding: .5rem; min-height: 120px; }
+    .kanban-col { background: var(--soft3); border: 1px solid var(--line); border-radius: 12px; padding: .5rem; min-height: 120px; }
     .kanban-col h4 { margin: 0 0 .5rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em;
       color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
-    .kanban-col h4 .count { background: #fff; border: 1px solid var(--line); border-radius: 999px; padding: 0 .4rem; font-size: .68rem; }
+    .kanban-col h4 .count { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 0 .4rem; font-size: .68rem; }
     .kanban-col.queued { border-top: 3px solid var(--muted); }
     .kanban-col.running { border-top: 3px solid var(--psych); }
     .kanban-col.completed { border-top: 3px solid var(--hero); }
     .kanban-col.failed { border-top: 3px solid var(--crisis); }
     .kanban-col.not-completed { border-top: 3px solid var(--warn); }
-    .kcard { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: .55rem .6rem; margin-bottom: .4rem;
+    .kcard { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: .55rem .6rem; margin-bottom: .4rem;
       font-size: .8rem; cursor: default; transition: box-shadow .15s; }
     .kcard:hover { box-shadow: 0 3px 10px rgba(0,0,0,.08); }
     .kcard.bugfix { border-left: 4px solid var(--crisis); }
@@ -1156,6 +1185,106 @@
     body.evolve-studio-only .page-shell { max-width: 1280px; }
     body.evolve-studio-only header .brand-sub { opacity: .85; }
 
+    /* ── Dark mode surface overrides (hard-coded light tokens) ── */
+    html[data-theme="dark"] .arc-chip { background: var(--soft2); border-color: var(--chip-line); color: var(--hero); }
+    html[data-theme="dark"] .arc-chip.off { background: var(--soft3); color: var(--muted); }
+    html[data-theme="dark"] .arc-chip.drop-target { background: color-mix(in srgb, var(--acid) 35%, var(--card)); }
+    html[data-theme="dark"] .pipeline-bar span { background: var(--soft2); }
+    html[data-theme="dark"] .kcard .kbody .bug-note { background: color-mix(in srgb, var(--crisis) 18%, var(--card)); }
+    html[data-theme="dark"] .kcard .kbar { background: var(--soft2); }
+    html[data-theme="dark"] .patch-card { background: var(--soft); }
+    html[data-theme="dark"] .evo-view-tabs { background: var(--soft); border-color: var(--line); }
+    html[data-theme="dark"] .evo-view-tabs button:hover { background: color-mix(in srgb, var(--card) 70%, transparent); }
+    html[data-theme="dark"] .evo-view-tabs button.active { background: var(--card); border-color: var(--chip-line); }
+    html[data-theme="dark"] .evo-workspace-empty { background: var(--soft3); }
+    html[data-theme="dark"] .evo-gallery-card { background: var(--card); }
+    html[data-theme="dark"] .evo-gallery-preview { background: var(--soft2); }
+    html[data-theme="dark"] .evo-gallery-preview iframe { background: var(--card); }
+    html[data-theme="dark"] .evo-gallery-meta span { background: var(--chip); border-color: var(--chip-line); color: var(--hero); }
+    html[data-theme="dark"] .evo-gallery-meta span.warn { background: color-mix(in srgb, var(--warn) 18%, var(--card)); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); color: var(--warn); }
+    html[data-theme="dark"] .evo-gallery-meta span.muted { background: var(--soft2); color: var(--muted); border-color: var(--line); }
+    html[data-theme="dark"] .evo-gallery-filters { background: var(--soft); border-color: var(--line); }
+    html[data-theme="dark"] .evo-gallery-filters input,
+    html[data-theme="dark"] .evo-gallery-filters select { background: var(--input-bg); color: var(--ink); border-color: var(--line); }
+    html[data-theme="dark"] .evo-hist-item { background: var(--card); }
+    html[data-theme="dark"] .evo-hist-item.active { background: var(--chip); }
+    html[data-theme="dark"] .gen-compare { background: var(--card); }
+    html[data-theme="dark"] .gen-fitness-chart { border-bottom-color: var(--line); }
+    html[data-theme="dark"] .gen-pane { background: var(--soft); border-color: var(--chip-line); }
+    html[data-theme="dark"] .gen-pane .roles span { background: var(--card); border-color: var(--chip-line); }
+    html[data-theme="dark"] .gen-diff { background: color-mix(in srgb, var(--psych) 14%, var(--card)); border-color: color-mix(in srgb, var(--psych) 35%, var(--line)); }
+    html[data-theme="dark"] .gen-prompt-item { background: var(--card); border-color: var(--line); }
+    html[data-theme="dark"] .gen-prompt-item:hover { background: var(--soft2); border-color: var(--chip-line); }
+    html[data-theme="dark"] .quota-chip { background: linear-gradient(135deg, var(--soft), var(--soft2)); border-color: var(--line); color: var(--ink); }
+    html[data-theme="dark"] .quota-chip .qc-cta { background: color-mix(in srgb, var(--psych) 14%, var(--card)); border-color: color-mix(in srgb, var(--psych) 35%, var(--line)); color: var(--psych); }
+    html[data-theme="dark"] .quota-chip.warn { background: linear-gradient(135deg, color-mix(in srgb, var(--crisis) 12%, var(--card)), color-mix(in srgb, var(--crisis) 18%, var(--card))); border-color: color-mix(in srgb, var(--crisis) 40%, var(--line)); }
+    html[data-theme="dark"] .quota-dash .q-card { background: var(--soft); border-color: var(--chip-line); }
+    html[data-theme="dark"] .quota-dash .q-stat { background: var(--card); border-color: var(--line); }
+    html[data-theme="dark"] .quota-dash .q-row .q-bar { background: var(--soft2); }
+    html[data-theme="dark"] .quota-dash .q-run { background: var(--chip); border-color: var(--chip-line); }
+    html[data-theme="dark"] .quota-dash .q-tabs button { background: var(--card); border-color: var(--line); color: var(--muted); }
+    html[data-theme="dark"] .quota-dash .q-tabs button.active { background: var(--chip); border-color: var(--chip-line); color: var(--hero); }
+    html[data-theme="dark"] .quota-dash .q-prov { background: var(--soft3); border-color: var(--line); }
+    html[data-theme="dark"] .quota-dash .q-prov.hot { background: color-mix(in srgb, var(--warn) 12%, var(--card)); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+    html[data-theme="dark"] .quota-dash.compact .qd-col { background: var(--soft3); border-color: var(--line); }
+    html[data-theme="dark"] .quota-dash.compact .qd-col.hot { background: color-mix(in srgb, var(--warn) 10%, var(--card)); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+    html[data-theme="dark"] .quota-dash.compact .qd-chip { background: var(--card); border-color: var(--line); color: var(--ink); }
+    html[data-theme="dark"] .quota-dash.compact .qd-chip.hot { background: color-mix(in srgb, var(--warn) 14%, var(--card)); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+    html[data-theme="dark"] .quota-dash.compact .q-mbar { background: var(--soft2); }
+    html[data-theme="dark"] .learnings-dash { background: var(--card); border-color: var(--chip-line); }
+    html[data-theme="dark"] .learn-item { background: var(--soft); border-color: var(--line); }
+    html[data-theme="dark"] .learn-item:hover { background: var(--chip); }
+    html[data-theme="dark"] .mp-tabs button { background: var(--card); border-color: var(--line); color: var(--psych); }
+    html[data-theme="dark"] .mp-tabs button.active { background: var(--psych); color: var(--hero-fg); border-color: var(--psych); }
+    html[data-theme="dark"] .maintainer-panel { background: color-mix(in srgb, var(--psych) 8%, var(--card)); border-color: color-mix(in srgb, var(--psych) 30%, var(--line)); }
+    html[data-theme="dark"] .evo-idea-chip { background: var(--card); border-color: var(--chip-line); color: var(--ink); }
+    html[data-theme="dark"] .evo-idea-chip:hover { background: var(--soft2); }
+    html[data-theme="dark"] .evo-idea-chip.active { background: var(--chip); }
+    html[data-theme="dark"] .evo-advanced { background: linear-gradient(180deg, var(--soft3) 0%, var(--card) 40%); border-color: var(--chip-line); }
+    html[data-theme="dark"] .evo-advanced[open] > summary { border-bottom-color: var(--line); }
+    html[data-theme="dark"] .evo-adv-section { background: var(--card); border-color: var(--line); }
+    html[data-theme="dark"] .evo-adv-grid label.small select,
+    html[data-theme="dark"] .evo-adv-grid label.small input { background: var(--input-bg); color: var(--ink); border-color: var(--line); }
+    html[data-theme="dark"] .evo-flag { background: var(--soft); border-color: var(--line); color: var(--ink); }
+    html[data-theme="dark"] .evo-flag:hover { background: var(--soft2); border-color: var(--chip-line); }
+    html[data-theme="dark"] .evo-flag:has(input:checked) { background: var(--chip); border-color: var(--chip-line); color: var(--hero); }
+    html[data-theme="dark"] .evo-pool-hint { background: var(--soft); border-color: var(--chip-line); color: var(--muted); }
+    html[data-theme="dark"] .evo-prov-chip,
+    html[data-theme="dark"] .evo-mcp-chip { background: var(--soft3); border-color: var(--line); color: var(--ink); }
+    html[data-theme="dark"] .evo-prov-chip:has(input:checked),
+    html[data-theme="dark"] .evo-mcp-chip:has(input:checked) { background: var(--chip); border-color: var(--hero); color: var(--hero); }
+    html[data-theme="dark"] .evo-bench-details textarea { background: var(--input-bg); color: var(--ink); border-color: var(--line); }
+    html[data-theme="dark"] .evo-digest .dig-row { background: var(--card); border-color: var(--line); }
+    html[data-theme="dark"] .evo-digest .dig-row:hover { background: var(--soft); border-color: var(--chip-line); }
+    html[data-theme="dark"] .evo-digest .dig-row.bad { background: color-mix(in srgb, var(--crisis) 12%, var(--card)); border-color: color-mix(in srgb, var(--crisis) 40%, var(--line)); }
+    html[data-theme="dark"] .tabs a.tab-link,
+    html[data-theme="dark"] .tabs button { background: var(--card); color: var(--ink); border-color: var(--line); }
+    html[data-theme="dark"] .tabs a.tab-link.active,
+    html[data-theme="dark"] .tabs button.active { background: var(--hero); color: var(--hero-fg); border-color: var(--hero); }
+    html[data-theme="dark"] .toast { background: var(--card); color: var(--ink); border: 1px solid var(--line); }
+    html[data-theme="dark"] .why-popover { background: var(--card); }
+    html[data-theme="dark"] .why-popover .why-reason { background: var(--soft3); }
+    html[data-theme="dark"] .why-popover .why-reason:hover { background: color-mix(in srgb, var(--psych) 12%, var(--card)); }
+    html[data-theme="dark"] .ann-popover,
+    html[data-theme="dark"] .bug-picker { background: var(--card); border-color: var(--line); color: var(--ink); }
+    html[data-theme="dark"] .note-item { background: var(--card); border-color: var(--line); }
+    html[data-theme="dark"] .hint { color: var(--muted); }
+    html[data-theme="dark"] .card { background: var(--card); }
+    html[data-theme="dark"] #authGate > div { background: var(--card) !important; border-color: var(--line) !important; color: var(--ink); }
+    html[data-theme="dark"] #authGate input { background: var(--input-bg); color: var(--ink); border-color: var(--line); }
+    html[data-theme="dark"] .log-modal .log-panel[style*="background:#f7faf4"],
+    html[data-theme="dark"] .log-modal .log-panel[style*="background: #f7faf4"] { background: var(--soft) !important; color: var(--ink) !important; }
+    html[data-theme="dark"] .log-modal .lp-head[style*="background:#e7f3ea"],
+    html[data-theme="dark"] .log-modal .lp-head[style*="background: #e7f3ea"] { background: var(--chip) !important; border-color: var(--line) !important; }
+    html[data-theme="dark"] .log-modal .lp-body[style*="background:#fff"],
+    html[data-theme="dark"] .log-modal .lp-body[style*="background: #fff"] { background: var(--card) !important; color: var(--ink) !important; }
+    html[data-theme="dark"] .log-modal .lp-foot[style*="background:#eef4ea"],
+    html[data-theme="dark"] .log-modal .lp-foot[style*="background: #eef4ea"] { background: var(--soft2) !important; border-color: var(--line) !important; color: var(--muted) !important; }
+    html[data-theme="dark"] .evo-flow-step { background: var(--soft2); border-color: var(--chip-line); color: var(--ink); }
+    html[data-theme="dark"] button.primary:hover { filter: brightness(1.08); }
+    html[data-theme="dark"] ::selection { background: color-mix(in srgb, var(--hero) 40%, transparent); color: var(--ink); }
+    html[data-theme="dark"] option { background: var(--card); color: var(--ink); }
+
   </style>
 </head>
 <body class="evolve-studio-only">
@@ -1186,6 +1315,9 @@
       <button class="small" id="btnNewProject">+ New</button>
       <span class="pill" id="skillPill">skill: —</span>
       <span class="pill" id="healthPill">connecting…</span>
+      <button type="button" class="small" id="btnThemeToggle" title="Toggle light / dark mode" aria-label="Toggle dark mode">
+        <span class="theme-ico" id="themeIcon">☾</span>
+      </button>
       <button class="small" id="btnReload">Reload</button>
       <button class="small primary" id="btnSave">Save</button>
     </div>
@@ -2163,6 +2295,35 @@
       const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
       document.body.appendChild(t); setTimeout(() => t.remove(), 2800);
     }
+
+    function getTheme() {
+      return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    }
+    function setTheme(theme) {
+      theme = theme === 'dark' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', theme);
+      try { localStorage.setItem('evolve.theme', theme); } catch (_) {}
+      const ico = document.getElementById('themeIcon');
+      if (ico) ico.textContent = theme === 'dark' ? '☀' : '☾';
+      const btn = document.getElementById('btnThemeToggle');
+      if (btn) btn.title = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+    }
+    function toggleTheme() {
+      setTheme(getTheme() === 'dark' ? 'light' : 'dark');
+    }
+    // Sync icon with pre-paint theme
+    try { setTheme(getTheme()); } catch (_) {}
+    document.addEventListener('DOMContentLoaded', () => {
+      const btn = document.getElementById('btnThemeToggle');
+      if (btn) btn.onclick = toggleTheme;
+      setTheme(getTheme());
+    });
+    // Also bind immediately if script runs after DOM ready
+    if (document.getElementById('btnThemeToggle')) {
+      document.getElementById('btnThemeToggle').onclick = toggleTheme;
+      setTheme(getTheme());
+    }
+
     // Cloudflare Tunnel / remote backend: studioApiBase lets the deployed frontend talk to a local agent backend.
     function apiUrl(path) {
       let base = localStorage.getItem('studioApiBase') || '';
